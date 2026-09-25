@@ -55,7 +55,7 @@ Then note the **App ID**, generate a **private key**, and use **Install App** to
 **3. Configure and install:**
 
 ```bash
-git clone https://github.com/Argon-Sky/agent-identities.git && cd agent-identities
+git clone https://github.com/Argon-Sky/agent-identity-launcher.git && cd agent-identity-launcher
 rm config/*.env                           # the author's own agents, kept as working examples
 cp examples/agent.env config/claude.env   # set ARGON_APP_ID, ARGON_KEY_REF, ARGON_COMMAND
 ./install.sh                              # links into ~/.local/bin and ~/.config; safe to re-run
