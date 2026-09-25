@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # install.sh — link this repository's launcher and configs into the places argon-agent expects.
 #
+#   ./install.sh                  create one launcher per config: <prefix><agent>, e.g. argon-claude
+#   ./install.sh --prefix my-     use a different launcher prefix (remembered for later runs)
+#
 # Safe to re-run (after cloning on a new Mac, after moving this repository, or after adding an agent).
 # Anything already at a target path that isn't the right symlink is moved aside to <path>.bak-<timestamp>.
 set -euo pipefail
@@ -8,8 +11,22 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 BIN="$HOME/.local/bin"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/argon-agents"
-SHIMS="$HOME/.local/share/argon-agents/shims"
+SHARE="$HOME/.local/share/argon-agents"
+SHIMS="$SHARE/shims"
 STAMP=$(date +%Y%m%d-%H%M%S)
+
+# The launcher prefix: --prefix, else the one used last time, else argon-.
+PREFIX=""
+[[ -f $SHARE/prefix ]] && PREFIX=$(< "$SHARE/prefix")
+case ${1:-} in
+  --prefix)   PREFIX=${2:-} ;;
+  --prefix=*) PREFIX=${1#--prefix=} ;;
+  "")         PREFIX=${PREFIX:-argon-} ;;
+  *)          echo "usage: $0 [--prefix <prefix>]" >&2; exit 1 ;;
+esac
+[[ $PREFIX =~ ^[A-Za-z0-9._-]+$ ]] || { echo "install.sh: the prefix may contain only letters, digits, '.', '_', and '-'" >&2; exit 1; }
+mkdir -p "$SHARE"
+echo "$PREFIX" > "$SHARE/prefix"
 
 link() {  # link <target> <path>
   local target=$1 path=$2
@@ -31,16 +48,16 @@ link "$REPO/bin/argon-agent" "$BIN/argon-agent"
 link "$REPO/config" "$CONFIG"
 link "$BIN/argon-agent" "$SHIMS/gh"
 for env in "$REPO"/config/*.env; do
-  link "$BIN/argon-agent" "$BIN/argon-$(basename "$env" .env)"
+  link "$BIN/argon-agent" "$BIN/$PREFIX$(basename "$env" .env)"
 done
 
-# Remove launchers whose config is gone (for example after renaming config/<agent>.env).
-for launcher in "$BIN"/argon-*; do
+# Remove launchers that no longer match a config (after renaming config/<agent>.env or changing the prefix).
+for launcher in "$BIN"/*; do
   name=$(basename "$launcher")
   [[ $name == argon-agent || ! -L $launcher || $(readlink "$launcher") != "$BIN/argon-agent" ]] && continue
-  if [[ ! -f $REPO/config/${name#argon-}.env ]]; then
+  if [[ $name != "$PREFIX"* || ! -f $REPO/config/${name#"$PREFIX"}.env ]]; then
     rm "$launcher"
-    echo "removed $launcher (no config/${name#argon-}.env)"
+    echo "removed $launcher (not $PREFIX<agent> for any config/<agent>.env)"
   fi
 done
 
@@ -63,7 +80,7 @@ esac
   echo "  warning: 1Password CLI has no account; enable 1Password → Settings → Developer → Integrate with 1Password CLI (see README)"
 
 echo
-echo "Next: run 'argon-agent check <agent>' for each agent:"
+echo "Launchers: ${PREFIX}<agent>. Next: run 'argon-agent check <agent>' for each agent:"
 for env in "$REPO"/config/*.env; do
   echo "  argon-agent check $(basename "$env" .env)"
 done

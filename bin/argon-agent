@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # argon-agent — run a coding agent under its own GitHub App identity.
 #
-#   argon-<agent> [args...]          run the agent (argon-claude, argon-codex, ... are symlinks to this script)
+#   <prefix><agent> [args...]        run the agent (argon-claude, argon-codex, ... are symlinks to this script;
+#                                    the prefix, argon- by default, is chosen with ./install.sh --prefix)
 #   argon-agent run <agent> [args]   same as above
 #   argon-agent check <agent>        show and test the identity the agent gets, without launching it
 #   argon-agent token <agent>        print a valid installation token
@@ -16,12 +17,13 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/argon-agents"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/argon-agents"   # non-secret app metadata
 TOKEN_DIR="${TMPDIR:-/tmp}/argon-agents-$(id -u)"          # installation tokens, directory 0700
 SHIM_DIR="$HOME/.local/share/argon-agents/shims"
+PREFIX_FILE="$HOME/.local/share/argon-agents/prefix"             # launcher prefix, written by install.sh
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
 die() { echo "argon-agent: $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,11s/^# \{0,1\}//p' "$SELF"
+  sed -n '2,12s/^# \{0,1\}//p' "$SELF"
   exit 1
 }
 
@@ -140,6 +142,12 @@ run() {
   export PATH="$SHIM_DIR:$PATH"
   unset GH_TOKEN GITHUB_TOKEN
 
+  # A launcher named like the agent's own command would find itself on PATH and exec itself forever.
+  local target
+  target=$(command -v "${ARGON_COMMAND[0]}") || die "command not found: ${ARGON_COMMAND[0]}"
+  [[ ${ARGON_COMMAND[*]:0:2} == "$SELF _verify" || $(realpath "$target") != "$SELF" ]] ||
+    die "${ARGON_COMMAND[0]} resolves to this launcher; pick a launcher prefix that doesn't shadow the agent's command"
+
   token > /dev/null   # mint now, so any 1Password prompt appears at launch rather than mid-session
   exec "${ARGON_COMMAND[@]}" "$@"
 }
@@ -203,8 +211,9 @@ case $name in
       _verify)        verify ;;
       *)              usage ;;
     esac ;;
-  argon-*)
-    load_config "${name#argon-}"; run "$@" ;;
   *)
-    die "unexpected name: $name" ;;
+    prefix=argon-
+    [[ -f $PREFIX_FILE ]] && prefix=$(< "$PREFIX_FILE")
+    [[ $name == "$prefix"?* ]] || die "unexpected name: $name (launchers are named $prefix<agent>)"
+    load_config "${name#"$prefix"}"; run "$@" ;;
 esac
