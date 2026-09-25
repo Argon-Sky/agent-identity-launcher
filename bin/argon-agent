@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# argon-agent — run a coding agent under its own GitHub App identity.
+#
+#   argon-<agent> [args...]          run the agent (argon-claude, argon-codex, ... are symlinks to this script)
+#   argon-agent run <agent> [args]   same as above
+#   argon-agent check <agent>        show and test the identity the agent gets, without launching it
+#   argon-agent token <agent>        print a valid installation token
+#
+# Per-agent config lives in ~/.config/argon-agents/<agent>.env (App ID, private key reference, command,
+# optionally the account the app is installed on). Inside an agent session, git asks this script for
+# credentials (credential helper) and `gh` goes through a shim that sets GH_TOKEN, so tokens are minted
+# on demand and never expire mid-session.
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/argon-agents"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/argon-agents"   # non-secret app metadata
+TOKEN_DIR="${TMPDIR:-/tmp}/argon-agents-$(id -u)"          # installation tokens, directory 0700
+SHIM_DIR="$HOME/.local/share/argon-agents/shims"
+SELF="$(realpath "${BASH_SOURCE[0]}")"
+
+die() { echo "argon-agent: $*" >&2; exit 1; }
+
+usage() {
+  sed -n '2,11s/^# \{0,1\}//p' "$SELF"
+  exit 1
+}
+
+load_config() {
+  AGENT="${1:-}"
+  [[ -n $AGENT ]] || usage
+  local file="$CONFIG_DIR/$AGENT.env"
+  [[ -f $file ]] || die "no config for '$AGENT' (expected $file)"
+  ARGON_APP_ID="" ARGON_KEY_REF="" ARGON_OWNER="" ARGON_COMMAND=()
+  # shellcheck source=/dev/null
+  source "$file"
+  [[ -n $ARGON_APP_ID && -n $ARGON_KEY_REF ]] || die "$file must set ARGON_APP_ID and ARGON_KEY_REF"
+  (( ${#ARGON_COMMAND[@]} )) || die "$file must set ARGON_COMMAND"
+}
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# Sets JWT: a ≤10 minute token proving "I am this GitHub App", signed with the app's private key.
+ensure_jwt() {
+  [[ -n ${JWT:-} ]] && return
+  local key now header payload signature
+  if [[ $ARGON_KEY_REF == op://* ]]; then
+    key=$(op read "$ARGON_KEY_REF") || die "could not read the private key from 1Password ($ARGON_KEY_REF)"
+  else
+    key=$(cat "${ARGON_KEY_REF/#\~/$HOME}") || die "could not read the private key file ($ARGON_KEY_REF)"
+  fi
+  now=$(date +%s)
+  header=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
+  payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$ARGON_APP_ID" | b64url)
+  signature=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign <(printf '%s\n' "$key") | b64url)
+  JWT="$header.$payload.$signature"
+}
+
+# Callers must run ensure_jwt first, in the main shell: inside $(...) the JWT would be lost after each call.
+github_as_app() {
+  curl -fsS -H "Authorization: Bearer $JWT" -H "Accept: application/vnd.github+json" "$@"
+}
+
+# Sets APP_SLUG, INSTALLATION_ID, BOT_EMAIL. Looked up once per App ID and cached; none of it is secret.
+load_meta() {
+  local file="$CACHE_DIR/$AGENT.meta"
+  if [[ -f $file ]]; then
+    # shellcheck source=/dev/null
+    source "$file"
+    [[ ${META_KEY:-} == "$ARGON_APP_ID/$ARGON_OWNER" ]] && return
+  fi
+  ensure_jwt
+  APP_SLUG=$(github_as_app https://api.github.com/app | jq -r .slug) || die "GitHub rejected app $ARGON_APP_ID (wrong App ID or key, or the clock is off?)"
+  local installations
+  installations=$(github_as_app https://api.github.com/app/installations)
+  if [[ -n $ARGON_OWNER ]]; then
+    INSTALLATION_ID=$(jq -r --arg owner "$ARGON_OWNER" '.[] | select(.account.login == $owner) | .id' <<< "$installations")
+    [[ -n $INSTALLATION_ID ]] || die "app $APP_SLUG is not installed on $ARGON_OWNER"
+  else
+    [[ $(jq length <<< "$installations") == 1 ]] || die "app $APP_SLUG has $(jq length <<< "$installations") installations; set ARGON_OWNER in $CONFIG_DIR/$AGENT.env"
+    INSTALLATION_ID=$(jq -r '.[0].id' <<< "$installations")
+  fi
+  local bot_id
+  bot_id=$(curl -fsS "https://api.github.com/users/${APP_SLUG}%5Bbot%5D" | jq -r .id) || die "could not look up the ${APP_SLUG}[bot] user"
+  BOT_EMAIL="${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+  mkdir -p "$CACHE_DIR"
+  printf 'META_KEY=%q\nAPP_SLUG=%q\nINSTALLATION_ID=%q\nBOT_EMAIL=%q\n' "$ARGON_APP_ID/$ARGON_OWNER" "$APP_SLUG" "$INSTALLATION_ID" "$BOT_EMAIL" > "$file"
+}
+
+# Prints a valid installation token (1 hour), reusing the cached one until 5 minutes before it expires.
+token() {
+  local file="$TOKEN_DIR/$AGENT.token" now expires cached tok tmp
+  now=$(date +%s)
+  if [[ -f $file ]]; then
+    read -r expires cached < "$file" || true
+    if (( ${expires:-0} - now > 300 )); then echo "$cached"; return; fi
+  fi
+  load_meta
+  ensure_jwt
+  tok=$(github_as_app -X POST "https://api.github.com/app/installations/$INSTALLATION_ID/access_tokens" | jq -r .token)
+  [[ $tok == ghs_* ]] || die "GitHub did not return an installation token"
+  [[ -d $TOKEN_DIR ]] || mkdir -m 700 "$TOKEN_DIR"
+  tmp=$(mktemp "$TOKEN_DIR/.token.XXXXXX")
+  echo "$((now + 3600)) $tok" > "$tmp"
+  mv "$tmp" "$file"
+  echo "$tok"
+}
+
+# Git credential helper protocol: git sends "get" plus key=value lines on stdin; answer only for github.com.
+git_credential() {
+  [[ ${1:-} == get ]] || exit 0
+  local line host=""
+  while IFS= read -r line && [[ -n $line ]]; do
+    [[ $line == host=* ]] && host=${line#host=}
+  done
+  [[ $host == github.com ]] || exit 0
+  load_config "${ARGON_AGENT:-}"
+  echo "username=x-access-token"
+  echo "password=$(token)"
+}
+
+# Sets up the agent's environment and replaces this process with the agent (or with `argon-agent _verify`).
+run() {
+  load_meta
+  local real_gh
+  real_gh=$(PATH=${PATH//"$SHIM_DIR:"/} command -v gh) || die "gh not found"
+
+  export ARGON_AGENT=$AGENT ARGON_REAL_GH=$real_gh
+  export GIT_AUTHOR_NAME="${APP_SLUG}[bot]" GIT_COMMITTER_NAME="${APP_SLUG}[bot]"
+  export GIT_AUTHOR_EMAIL=$BOT_EMAIL GIT_COMMITTER_EMAIL=$BOT_EMAIL
+
+  # Git config through the environment only; ~/.gitconfig is untouched.
+  #   0: clear inherited helpers (Xcode's git sets osxkeychain, which would answer with *your* login)
+  #   1: ask this script instead
+  #   2: send git@github.com: remotes over HTTPS, because installation tokens don't work over SSH
+  export GIT_CONFIG_COUNT=3
+  export GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=""
+  export GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1="!'$SELF' git-credential"
+  export GIT_CONFIG_KEY_2=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_2=git@github.com:
+
+  export PATH="$SHIM_DIR:$PATH"
+  unset GH_TOKEN GITHUB_TOKEN
+
+  token > /dev/null   # mint now, so any 1Password prompt appears at launch rather than mid-session
+  exec "${ARGON_COMMAND[@]}" "$@"
+}
+
+# Runs inside the agent environment (via `check`) and tests what an agent would actually get.
+verify() {
+  local ok=1 repos repo shell shell_gh
+  echo "git author:     $(git var GIT_AUTHOR_IDENT | sed 's/ [0-9]* [-+][0-9]*$//')"
+  echo "git committer:  $(git var GIT_COMMITTER_IDENT | sed 's/ [0-9]* [-+][0-9]*$//')"
+  if repos=$(gh api /installation/repositories --jq '"\(.total_count) \(.repositories[0].full_name // "")"' 2>/dev/null); then
+    echo "gh identity:    ok (installation token, ${repos%% *} repositories)"
+    repo=${repos#* }
+  else
+    echo "gh identity:    FAILED"; ok=0
+  fi
+  if [[ -z ${repo:-} ]]; then
+    echo "git auth:       SKIPPED (the app can't access any repository)"; ok=0
+  elif git ls-remote "git@github.com:$repo.git" HEAD > /dev/null 2>&1; then
+    echo "git auth:       ok (installation token over HTTPS, tested on $repo)"
+  else
+    echo "git auth:       FAILED (on $repo)"; ok=0
+  fi
+  shell=$(basename "${SHELL:-zsh}")
+  shell_gh=$("$shell" -ic 'command -v gh' 2>/dev/null | tail -1)
+  if [[ $shell_gh == "$SHIM_DIR/gh" ]]; then
+    echo "gh in $shell:$(printf '%*s' $((9 - ${#shell})) '')ok (shim)"
+  else
+    echo "gh in $shell:  WARNING: an interactive $shell resolves gh to $shell_gh, so your shell startup file puts it before the shim"; ok=0
+  fi
+  (( ok )) && echo "identity:       consistent" || exit 1
+}
+
+check() {
+  load_meta
+  echo "agent:          $AGENT → ${ARGON_COMMAND[*]}"
+  echo "github app:     $APP_SLUG (app $ARGON_APP_ID, installation $INSTALLATION_ID)"
+  ARGON_COMMAND=("$SELF" _verify)
+  run
+}
+
+# gh shim: inside an agent session, give every gh call a fresh token.
+gh_shim() {
+  if [[ -z ${ARGON_AGENT:-} || -z ${ARGON_REAL_GH:-} ]]; then
+    exec "$(PATH=${PATH//"$SHIM_DIR:"/} command -v gh)" "$@"   # not in an agent session: behave like plain gh
+  fi
+  load_config "$ARGON_AGENT"
+  GH_TOKEN=$(token) exec "$ARGON_REAL_GH" "$@"
+}
+
+name=$(basename "$0")
+case $name in
+  gh)
+    gh_shim "$@" ;;
+  argon-agent)
+    command=${1:-}; shift || true
+    case $command in
+      run)            load_config "${1:-}"; shift; run "$@" ;;
+      check)          load_config "${1:-}"; check ;;
+      token)          load_config "${1:-}"; token ;;
+      git-credential) git_credential "$@" ;;
+      _verify)        verify ;;
+      *)              usage ;;
+    esac ;;
+  argon-*)
+    load_config "${name#argon-}"; run "$@" ;;
+  *)
+    die "unexpected name: $name" ;;
+esac
