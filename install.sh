@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# install.sh — link this repository's launcher and configs into the places argon-agent expects.
+# install.sh — link this repository's launcher into place and create one launcher per agent config.
 #
-#   ./install.sh                  create one launcher per config: <prefix><agent>, e.g. argon-claude
+#   ./install.sh                  create one launcher per ~/.config/argon-agents/<agent>.env: <prefix><agent>, e.g. argon-claude
 #   ./install.sh --prefix my-     use a different launcher prefix (remembered for later runs)
 #
 # Safe to re-run (after cloning on a new Mac, after moving this repository, or after adding an agent).
+# Agent configs live outside this repository and are never touched.
 # Anything already at a target path that isn't the right symlink is moved aside to <path>.bak-<timestamp>.
 set -euo pipefail
 
@@ -45,19 +46,20 @@ link() {  # link <target> <path>
 
 chmod +x "$REPO/bin/argon-agent"
 link "$REPO/bin/argon-agent" "$BIN/argon-agent"
-link "$REPO/config" "$CONFIG"
+mkdir -p "$CONFIG"
 link "$BIN/argon-agent" "$SHIMS/gh"
-for env in "$REPO"/config/*.env; do
+shopt -s nullglob
+for env in "$CONFIG"/*.env; do
   link "$BIN/argon-agent" "$BIN/$PREFIX$(basename "$env" .env)"
 done
 
-# Remove launchers that no longer match a config (after renaming config/<agent>.env or changing the prefix).
+# Remove launchers that no longer match a config (after renaming <agent>.env or changing the prefix).
 for launcher in "$BIN"/*; do
   name=$(basename "$launcher")
   [[ $name == argon-agent || ! -L $launcher || $(readlink "$launcher") != "$BIN/argon-agent" ]] && continue
-  if [[ $name != "$PREFIX"* || ! -f $REPO/config/${name#"$PREFIX"}.env ]]; then
+  if [[ $name != "$PREFIX"* || ! -f $CONFIG/${name#"$PREFIX"}.env ]]; then
     rm "$launcher"
-    echo "removed $launcher (not $PREFIX<agent> for any config/<agent>.env)"
+    echo "removed $launcher (not $PREFIX<agent> for any $CONFIG/<agent>.env)"
   fi
 done
 
@@ -80,7 +82,13 @@ esac
   echo "  warning: 1Password CLI has no account; enable 1Password → Settings → Developer → Integrate with 1Password CLI (see README)"
 
 echo
+envs=("$CONFIG"/*.env)
+if (( ${#envs[@]} == 0 )); then
+  echo "No agents configured yet. Add one, then re-run ./install.sh:"
+  echo "  cp examples/agent.env $CONFIG/claude.env"
+  exit 0
+fi
 echo "Launchers: ${PREFIX}<agent>. Next: run 'argon-agent check <agent>' for each agent:"
-for env in "$REPO"/config/*.env; do
+for env in "${envs[@]}"; do
   echo "  argon-agent check $(basename "$env" .env)"
 done

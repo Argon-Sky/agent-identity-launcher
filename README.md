@@ -44,7 +44,7 @@ Each agent gets a [GitHub App](https://docs.github.com/en/apps), which is GitHub
 
 ```text
 argon-claude
-  1. reads config/claude.env                  App ID, private key reference, command
+  1. reads ~/.config/argon-agents/claude.env  App ID, private key reference, command
   2. signs a JWT with the app's private key   proves "I am this GitHub App"
   3. exchanges it for an installation token   valid 1 hour, cached until 5 min before expiry
   4. sets the environment for this process    bot author/committer, git credential helper, gh shim
@@ -79,20 +79,20 @@ Then note the **App ID**, generate a **private key**, and use **Install App** to
 
 ```bash
 git clone https://github.com/Argon-Sky/agent-identity-launcher.git && cd agent-identity-launcher
-rm config/*.env                           # the author's own agents, kept as working examples
-cp examples/agent.env config/claude.env   # set ARGON_APP_ID, ARGON_KEY_REF, ARGON_COMMAND
-./install.sh                              # links into ~/.local/bin and ~/.config; safe to re-run; add --prefix my- for my-claude
-argon-agent check claude                  # should end with "identity: consistent"
+mkdir -p ~/.config/argon-agents
+cp examples/agent.env ~/.config/argon-agents/claude.env   # set ARGON_APP_ID, ARGON_KEY_REF, ARGON_COMMAND
+./install.sh                                              # links into ~/.local/bin; safe to re-run; add --prefix my- for my-claude
+argon-agent check claude                                  # should end with "identity: consistent"
 ```
 
-Make sure `~/.local/bin` is on your `PATH`. The command you type and the name GitHub shows are set in different places, and neither depends on the other:
+Configs live in `~/.config/argon-agents`, outside the clone, so updating or moving the repository never touches them. Make sure `~/.local/bin` is on your `PATH`. The command you type and the name GitHub shows are set in different places, and neither depends on the other:
 
 | Name | Set by | Example |
 |---|---|---|
-| Launcher (what you type) | The prefix (`argon-` unless you pass `./install.sh --prefix`) plus the config file name | `config/claude.env` → `argon-claude`, or `my-claude` with `--prefix my-` |
+| Launcher (what you type) | The prefix (`argon-` unless you pass `./install.sh --prefix`) plus the config file name | `claude.env` → `argon-claude`, or `my-claude` with `--prefix my-` |
 | Committer on GitHub | The GitHub App's name from step 1 | App `<you>-claude` → `<you>-claude[bot]` |
 
-Matching them is only a convenience. In the author's setup `argon-claude` commits as `argon-claude[bot]`, but `argon-cmd` (from `config/cmd.env`) commits as `argon-command-code[bot]`.
+Matching them is only a convenience. In the author's setup `argon-claude` commits as `argon-claude[bot]`, but `argon-cmd` (from `cmd.env`) commits as `argon-command-code[bot]`.
 
 **4. Turn off the agent's own attribution.** Claude Code adds `Co-Authored-By: Claude …` to commits, so GitHub shows `claude` as a second author next to the bot. Turn it off in `~/.claude/settings.json` (all sessions):
 
@@ -110,7 +110,7 @@ argon-agent check <agent>     # test the identity without starting the agent
 argon-agent token <agent>     # print a valid installation token
 ```
 
-To rename a launcher, rename its config or change the prefix with `./install.sh --prefix …`; old launchers are removed. To change the committer name, rename the GitHub App (then `rm -rf ~/.cache/argon-agents`). To rotate a key, generate a new one on the app's page, replace it, run `check`, then delete the old one.
+To add or rename an agent, add or rename its config, then re-run `./install.sh` (or change the prefix with `./install.sh --prefix …`); old launchers are removed. To change the committer name, rename the GitHub App (then `rm -rf ~/.cache/argon-agents`). To rotate a key, generate a new one on the app's page, replace it, run `check`, then delete the old one.
 
 ## Troubleshooting
 
