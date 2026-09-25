@@ -13,6 +13,10 @@ Claude Code starts as usual, but every commit is authored by `argon-claude[bot]`
 - **Nothing long-lived in the session.** Tokens expire after an hour and are minted on demand; the private key stays in 1Password.
 - **Revoke one agent, not yourself.** Suspend or delete an agent's app; your own access and the other agents are untouched.
 
+This repository's own history, written by Claude Code through the launcher:
+
+<img src="docs/commits.png" alt="GitHub commit list where every commit is authored by argon-claude[bot]" width="600">
+
 No daemon, no server, no changes to your `~/.gitconfig`, SSH keys, or `gh` login: one bash script and one small config file per agent. Plain `claude` keeps working as you.
 
 ## How it works
