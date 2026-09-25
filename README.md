@@ -2,7 +2,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
     <source media="(prefers-color-scheme: light)" srcset="docs/logo-light.svg">
-    <img alt="Agent Identity Launcher" src="docs/logo-dark.svg" width="60%">
+    <img alt="Agent Identity Launcher" src="docs/logo-light.svg" width="60%">
   </picture>
 </div>
 
@@ -17,7 +17,7 @@
 
 <br>
 
-Agent Identity Launcher is a small wrapper that starts your coding agent (Claude Code, Codex, OpenCode, …) under its own GitHub App identity.
+Agent Identity Launcher is a small launcher that starts your coding agent (Claude Code, Codex, OpenCode, …) under its own GitHub App identity.
 
 Your coding agents commit as you, push with your keys, and can reach every repository you can. Give each one its own GitHub identity instead.
 
@@ -29,7 +29,7 @@ Claude Code starts as usual, but every commit is authored by the agent's own bot
 
 - **Know who wrote what.** Every commit and pull request links to the agent that made it.
 - **Least privilege.** Each agent sees only the repositories and permissions you grant it.
-- **Nothing long-lived in the session.** Tokens expire after an hour and are minted on demand; the private key stays in 1Password.
+- **Nothing long-lived in the session.** Tokens expire after an hour and are minted on demand; the private key stays in 1Password or in a key file you control.
 - **Revoke one agent, not yourself.** Suspend or delete an agent's app; your own access and the other agents are untouched.
 
 This repository's own history, written by Claude Code through the launcher:
@@ -40,7 +40,7 @@ No daemon, no server, no changes to your `~/.gitconfig`, SSH keys, or `gh` login
 
 ## How it works
 
-Each agent gets a [GitHub App](https://docs.github.com/en/apps), which is GitHub's supported way to give software its own identity. (A machine user per agent isn't: GitHub's terms allow one per person. A personal access token would still be you.)
+Each agent gets a [GitHub App](https://docs.github.com/en/apps), which is GitHub's supported way to give software its own identity. (A machine user per agent isn't: GitHub's terms allow one free machine account per person, and each paid one takes a seat. A personal access token would still be you.)
 
 ```text
 argon-claude
@@ -59,9 +59,9 @@ Git is configured through `GIT_CONFIG_*` environment variables only: inherited c
 
 ## Setup
 
-Requirements: macOS (Linux untested), git ≥ 2.31, curl, OpenSSL 3, jq, `gh`, bash ≥ 3.2; optionally the 1Password CLI (`op`).
+Requirements: macOS 13 or later (Linux untested), git ≥ 2.31, curl, OpenSSL 3, jq, `gh`, bash ≥ 3.2; optionally the 1Password CLI (`op`).
 
-**1. Create a GitHub App per agent** on the account that owns your repositories (Settings → Developer settings → GitHub Apps → New GitHub App):
+**1. Create a GitHub App per agent** on the account that owns your repositories (your user or organization settings → Developer settings → GitHub Apps → New GitHub App):
 
 | Field | Value |
 |---|---|
@@ -73,7 +73,10 @@ Requirements: macOS (Linux untested), git ≥ 2.31, curl, OpenSSL 3, jq, `gh`, b
 
 Then note the **App ID**, generate a **private key**, and use **Install App** to install it on the repositories the agent may access.
 
-**2. Store the private key.** Either in 1Password, and check that `op read "op://…/private key" | openssl pkey -noout` works (the CLI must be connected to the desktop app: Settings → Developer → Integrate with 1Password CLI), or as a file outside this repository with `chmod 600`.
+**2. Store the private key**, in one of two ways:
+
+- In 1Password. Connect the CLI to the desktop app (Settings → Developer → Integrate with 1Password CLI), then check that `op read "op://…/private key" | openssl pkey -noout` works.
+- As a file outside this repository, with `chmod 600`.
 
 **3. Configure and install:**
 
