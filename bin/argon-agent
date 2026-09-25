@@ -23,7 +23,7 @@ SELF="$(realpath "${BASH_SOURCE[0]}")"
 die() { echo "argon-agent: $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,12s/^# \{0,1\}//p' "$SELF"
+  sed -n '2,13s/^# \{0,1\}//p' "$SELF"
   exit 1
 }
 
@@ -73,7 +73,7 @@ load_meta() {
   ensure_jwt
   APP_SLUG=$(github_as_app https://api.github.com/app | jq -r .slug) || die "GitHub rejected app $ARGON_APP_ID (wrong App ID or key, or the clock is off?)"
   local installations
-  installations=$(github_as_app https://api.github.com/app/installations)
+  installations=$(github_as_app https://api.github.com/app/installations) || die "could not list the installations of app $APP_SLUG"
   if [[ -n $ARGON_OWNER ]]; then
     INSTALLATION_ID=$(jq -r --arg owner "$ARGON_OWNER" '.[] | select(.account.login == $owner) | .id' <<< "$installations")
     [[ -n $INSTALLATION_ID ]] || die "app $APP_SLUG is not installed on $ARGON_OWNER"
@@ -92,15 +92,17 @@ load_meta() {
 token() {
   local file="$TOKEN_DIR/$AGENT.token" now expires cached tok tmp
   now=$(date +%s)
+  [[ -d $TOKEN_DIR ]] || mkdir -m 700 "$TOKEN_DIR"
+  [[ -O $TOKEN_DIR ]] || die "$TOKEN_DIR belongs to another user; remove it"   # e.g. created in a shared /tmp
+  chmod 700 "$TOKEN_DIR"
   if [[ -f $file ]]; then
     read -r expires cached < "$file" || true
     if (( ${expires:-0} - now > 300 )); then echo "$cached"; return; fi
   fi
   load_meta
   ensure_jwt
-  tok=$(github_as_app -X POST "https://api.github.com/app/installations/$INSTALLATION_ID/access_tokens" | jq -r .token)
+  tok=$(github_as_app -X POST "https://api.github.com/app/installations/$INSTALLATION_ID/access_tokens" | jq -r .token) || tok=""
   [[ $tok == ghs_* ]] || die "GitHub did not return an installation token"
-  [[ -d $TOKEN_DIR ]] || mkdir -m 700 "$TOKEN_DIR"
   tmp=$(mktemp "$TOKEN_DIR/.token.XXXXXX")
   echo "$((now + 3600)) $tok" > "$tmp"
   mv "$tmp" "$file"
@@ -122,6 +124,13 @@ git_credential() {
 
 # Sets up the agent's environment and replaces this process with the agent (or with `argon-agent _verify`).
 run() {
+  # A launcher named like the agent's own command would find itself on PATH and exec itself forever.
+  # Checked first, before anything that may prompt for 1Password or call GitHub.
+  local target
+  target=$(command -v "${ARGON_COMMAND[0]}") || die "command not found: ${ARGON_COMMAND[0]}"
+  [[ ${ARGON_COMMAND[*]:0:2} == "$SELF _verify" || $(realpath "$target") != "$SELF" ]] ||
+    die "${ARGON_COMMAND[0]} resolves to this launcher; pick a launcher prefix that doesn't shadow the agent's command"
+
   load_meta
   local real_gh
   real_gh=$(PATH=${PATH//"$SHIM_DIR:"/} command -v gh) || die "gh not found"
@@ -141,12 +150,6 @@ run() {
 
   export PATH="$SHIM_DIR:$PATH"
   unset GH_TOKEN GITHUB_TOKEN
-
-  # A launcher named like the agent's own command would find itself on PATH and exec itself forever.
-  local target
-  target=$(command -v "${ARGON_COMMAND[0]}") || die "command not found: ${ARGON_COMMAND[0]}"
-  [[ ${ARGON_COMMAND[*]:0:2} == "$SELF _verify" || $(realpath "$target") != "$SELF" ]] ||
-    die "${ARGON_COMMAND[0]} resolves to this launcher; pick a launcher prefix that doesn't shadow the agent's command"
 
   token > /dev/null   # mint now, so any 1Password prompt appears at launch rather than mid-session
   exec "${ARGON_COMMAND[@]}" "$@"
