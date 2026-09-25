@@ -1,6 +1,25 @@
-# Agent Identity Launcher
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/logo-light.svg">
+    <img alt="Agent Identity Launcher" src="docs/logo-dark.svg" width="60%">
+  </picture>
+</div>
 
-**Your coding agents commit as you, push with your keys, and can reach every repository you can. Give each one its own GitHub identity instead.**
+<div align="center">
+  <h3>Give each coding agent its own GitHub identity</h3>
+</div>
+
+<div align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-brightgreen?style=flat" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/platform-macOS-blue?style=flat" alt="Platform: macOS">
+</div>
+
+<br>
+
+Agent Identity Launcher is a small wrapper that starts your coding agent (Claude Code, Codex, OpenCode, …) under its own GitHub App identity.
+
+Your coding agents commit as you, push with your keys, and can reach every repository you can. Give each one its own GitHub identity instead.
 
 ```bash
 argon-claude     # instead of claude
