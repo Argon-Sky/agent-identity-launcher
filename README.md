@@ -122,7 +122,3 @@ To rename a launcher, rename its config or change the prefix with `./install.sh 
 | `app … has N installations` | Set `ARGON_OWNER` in the agent's config. |
 | `gh in zsh: WARNING` | A shell startup file prepends another `gh` before the shim; make it append to `PATH` instead. |
 | Anything stale | `rm -rf ~/.cache/argon-agents "$TMPDIR/argon-agents-$(id -u)"` |
-
-## License
-
-[MIT](LICENSE)
