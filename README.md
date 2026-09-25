@@ -25,7 +25,7 @@ Your coding agents commit as you, push with your keys, and can reach every repos
 argon-claude     # instead of claude
 ```
 
-Claude Code starts as usual, but every commit is authored by `argon-claude[bot]`, and `git` and `gh` authenticate with an hour-long token that belongs to the agent, not to you. The same goes for Codex, OpenCode, or any other CLI agent: one launcher each, one identity each.
+Claude Code starts as usual, but every commit is authored by the agent's own bot, here `argon-claude[bot]`, and `git` and `gh` authenticate with an hour-long token that belongs to the agent, not to you. The same goes for Codex, OpenCode, or any other CLI agent: one launcher each, one identity each.
 
 - **Know who wrote what.** Every commit and pull request links to the agent that made it.
 - **Least privilege.** Each agent sees only the repositories and permissions you grant it.
@@ -81,11 +81,18 @@ Then note the **App ID**, generate a **private key**, and use **Install App** to
 git clone https://github.com/Argon-Sky/agent-identity-launcher.git && cd agent-identity-launcher
 rm config/*.env                           # the author's own agents, kept as working examples
 cp examples/agent.env config/claude.env   # set ARGON_APP_ID, ARGON_KEY_REF, ARGON_COMMAND
-./install.sh                              # links into ~/.local/bin and ~/.config; safe to re-run
+./install.sh                              # links into ~/.local/bin and ~/.config; safe to re-run; add --prefix my- for my-claude
 argon-agent check claude                  # should end with "identity: consistent"
 ```
 
-The config file name decides the launcher name: `config/claude.env` → `argon-claude`. Make sure `~/.local/bin` is on your `PATH`.
+Make sure `~/.local/bin` is on your `PATH`. The command you type and the name GitHub shows are set in different places, and neither depends on the other:
+
+| Name | Set by | Example |
+|---|---|---|
+| Launcher (what you type) | The prefix (`argon-` unless you pass `./install.sh --prefix`) plus the config file name | `config/claude.env` → `argon-claude`, or `my-claude` with `--prefix my-` |
+| Committer on GitHub | The GitHub App's name from step 1 | App `<you>-claude` → `<you>-claude[bot]` |
+
+Matching them is only a convenience. In the author's setup `argon-claude` commits as `argon-claude[bot]`, but `argon-cmd` (from `config/cmd.env`) commits as `argon-command-code[bot]`.
 
 **4. Turn off the agent's own attribution.** Claude Code adds `Co-Authored-By: Claude …` to commits, so GitHub shows `claude` as a second author next to the bot. Turn it off in `~/.claude/settings.json` (all sessions):
 
@@ -98,18 +105,18 @@ or only for the launcher: `ARGON_COMMAND=(claude --settings '{"attribution":{"co
 ## Usage
 
 ```bash
-argon-<agent> [args...]       # run the agent under its identity; arguments are passed through
+<prefix><agent> [args...]     # e.g. argon-claude: run the agent under its identity; arguments are passed through
 argon-agent check <agent>     # test the identity without starting the agent
 argon-agent token <agent>     # print a valid installation token
 ```
 
-To rename a launcher, rename its config and re-run `./install.sh`. To rotate a key, generate a new one on the app's page, replace it, run `check`, then delete the old one.
+To rename a launcher, rename its config or change the prefix with `./install.sh --prefix …`; old launchers are removed. To change the committer name, rename the GitHub App (then `rm -rf ~/.cache/argon-agents`). To rotate a key, generate a new one on the app's page, replace it, run `check`, then delete the old one.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| Commits show your personal name | The agent was started as `claude`, not `argon-claude`. |
+| Commits show your personal name | The agent was started as `claude`, not through its launcher (`argon-claude`). |
 | `could not read the private key from 1Password` | Run `op account list`; if empty, connect the CLI to the desktop app. Re-copy the secret reference. |
 | `GitHub rejected app …` | Wrong App ID or key, or the clock is off. |
 | `app … has N installations` | Set `ARGON_OWNER` in the agent's config. |
