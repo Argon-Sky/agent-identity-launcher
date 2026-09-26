@@ -34,7 +34,9 @@ Claude Code starts as usual, but every commit is authored by the agent's own bot
 
 This repository's own history, written by Claude Code through the launcher:
 
-<img src="docs/commits.png" alt="GitHub commit list where every commit is authored by argon-claude[bot]" width="600">
+<div align="center">
+  <img src="docs/commits.png" alt="GitHub commit list where every commit is authored by argon-claude[bot]" width="600">
+</div>
 
 No daemon, no server, no changes to your `~/.gitconfig`, SSH keys, or `gh` login: one bash script and one small config file per agent. Plain `claude` keeps working as you.
 
