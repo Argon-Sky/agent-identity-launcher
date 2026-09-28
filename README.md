@@ -77,8 +77,8 @@ Then note the **App ID**, generate a **private key**, and use **Install App** to
 
 **2. Store the private key**, in one of two ways:
 
-- In 1Password. Connect the CLI to the desktop app (Settings → Developer → Integrate with 1Password CLI), then check that `op read "op://…/private key" | openssl pkey -noout` works.
-- As a file outside this repository, with `chmod 600`.
+- In 1Password. Connect the CLI to the desktop app (Settings → Developer → Integrate with 1Password CLI), then check that `op read "op://…/private key" | openssl pkey -noout` works. (To skip the Touch ID prompts that come with this, see [Fewer Touch ID prompts](#fewer-touch-id-prompts).)
+- As a file outside this repository, with `chmod 600`. **Nothing else in this repository uses 1Password**: `op` is optional, the launcher only shells out to it for an `op://` key, and `install.sh` only mentions 1Password when a config actually reads a key from it. If you keep keys in files, you can ignore this page's 1Password mentions entirely.
 
 **3. Configure and install:**
 
@@ -148,7 +148,7 @@ To add or rename an agent, add or rename its config, then re-run `./install.sh` 
 | Symptom | Fix |
 |---|---|
 | Commits show your personal name | The agent was started as `claude`, not through its launcher (`argon-claude`). |
-| `could not read the private key from 1Password` | Run `op account list`; if empty, connect the CLI to the desktop app. Re-copy the secret reference. |
+| `could not read the private key from 1Password` | Only if a config uses an `op://` key. Run `op account list`; if empty, connect the CLI to the desktop app. Re-copy the secret reference, or point `ARGON_KEY_REF` at a key file instead. |
 | `op.token must be chmod 600` | `chmod 600 ~/.config/argon-agents/op.token`, or delete it to go back to Touch ID. |
 | `op.token is empty` / `is not a regular file` | Delete `op.token` to go back to 1Password app authentication, or write the token to it again. |
 | `(429) Too Many Requests` from `op read` | The account hit its daily service account limit. Switch the refs to ID form, or revoke unused service accounts. |

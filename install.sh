@@ -65,13 +65,22 @@ done
 
 echo
 echo "Prerequisites:"
+# Whether any config needs the 1Password CLI at all, so the warnings below only fire when it is used.
+uses_op=0
+for env in "$CONFIG"/*.env; do
+  grep -q '^ARGON_KEY_REF="\?op://' "$env" 2> /dev/null && uses_op=1
+done
 # Without the shim dir, so a run from inside an agent session reports the real gh, not the shim.
 TOOL_PATH=${PATH//"$SHIMS:"/}
 for tool in git curl openssl jq gh op; do
   if PATH=$TOOL_PATH command -v "$tool" > /dev/null; then
     printf '  %-8s %s\n' "$tool" "$(PATH=$TOOL_PATH command -v "$tool")"
   elif [[ $tool == op ]]; then
-    printf '  %-8s not installed (optional: only needed for keys in 1Password)\n' "$tool"
+    if (( uses_op )); then
+      printf '  %-8s MISSING (a config reads its key from 1Password; or use a key file, see README)\n' "$tool"
+    else
+      printf '  %-8s not installed (optional: no config reads a key from 1Password)\n' "$tool"
+    fi
   else
     printf '  %-8s MISSING\n' "$tool"
   fi
@@ -81,9 +90,14 @@ case ":$PATH:" in
   *":$BIN:"*) ;;
   *) echo "  warning: $BIN is not on PATH" ;;
 esac
-# `op whoami` fails until a command is authorized in the session, so check for a connected account instead.
-! command -v op > /dev/null || [[ $(op account list --format=json 2> /dev/null | jq length 2> /dev/null) -gt 0 ]] 2> /dev/null ||
-  echo "  warning: 1Password CLI has no account; enable 1Password → Settings → Developer → Integrate with 1Password CLI (see README)"
+# Only warn about 1Password when a config actually reads a key from it, so a user who keeps keys in
+# files is not told to configure a tool they don't use. `op whoami` fails until a command is authorized
+# in the session, so check for a connected account instead.
+if (( uses_op )) && { ! command -v op > /dev/null || [[ $(op account list --format=json 2> /dev/null | jq length 2> /dev/null) -gt 0 ]] 2> /dev/null; }; then
+  echo "  warning: a config reads its key from 1Password, but the CLI has no usable account;"
+  echo "           enable 1Password → Settings → Developer → Integrate with 1Password CLI, or add an"
+  echo "           op.token beside the configs (see README, \"Fewer Touch ID prompts\")"
+fi
 
 echo
 envs=("$CONFIG"/*.env)

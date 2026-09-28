@@ -50,14 +50,16 @@ b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 # A service account token is a long-lived credential for every app key in its vault. Refuse one that
 # anyone else can read, rather than silently falling back to a Touch ID prompt that hides the mistake.
 # Checked here, outside $(...), so `die` ends the script instead of just a subshell.
+# `ls -ldL` is used rather than `stat` because its output is the same on macOS and Linux, where stat's
+# flags differ (-f means --file-system on GNU). -L dereferences, so a symlinked token is judged by the
+# file it points at; the trailing -rw------- is the portable "owner only" form.
 check_op_token() {
   [[ -e $OP_TOKEN_FILE ]] || return 0
   [[ -f $OP_TOKEN_FILE ]] || die "$OP_TOKEN_FILE is not a regular file; remove it to go back to 1Password app authentication"
   [[ -s $OP_TOKEN_FILE ]] || die "$OP_TOKEN_FILE is empty; save the service account token there, or remove it to go back to 1Password app authentication"
-  local mode
-  mode=$(stat -f '%Lp' -L "$OP_TOKEN_FILE") || die "could not read the 1Password service account token ($OP_TOKEN_FILE)"
-  # -L follows symlinks, so the check applies to the file the token is actually read from.
-  [[ $mode == 600 ]] || die "$OP_TOKEN_FILE must be chmod 600 (is $mode); refusing to use a readable service account token"
+  local perms
+  perms=$(ls -ldL "$OP_TOKEN_FILE") || die "could not read the 1Password service account token ($OP_TOKEN_FILE)"
+  [[ ${perms:0:10} == -rw------- ]] || die "$OP_TOKEN_FILE must be chmod 600 (is ${perms:1:9}); refusing to use a service account token other users can read"
 }
 
 # Reads a secret reference. When a service account token is present, it is passed to this one `op read`
