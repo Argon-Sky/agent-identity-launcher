@@ -29,7 +29,7 @@ Claude Code starts as usual, but every commit is authored by the agent's own bot
 
 - **Know who wrote what.** Every commit and pull request links to the agent that made it.
 - **Least privilege.** Each agent sees only the repositories and permissions you grant it.
-- **Nothing long-lived in the session.** Tokens expire after an hour and are minted on demand; the private key stays in 1Password or in a key file you control.
+- **Nothing long-lived in the session.** Installation tokens expire after an hour and are minted on demand. The app's private key stays in 1Password or in a key file you control; the one long-lived credential this can hold is an optional 1Password service account token, described under [Fewer Touch ID prompts](#fewer-touch-id-prompts).
 - **Revoke one agent, not yourself.** Suspend or delete an agent's app; your own access and the other agents are untouched.
 
 This repository's own history, written by Claude Code through the launcher:
@@ -107,6 +107,32 @@ Matching them is only a convenience. In the author's setup `argon-claude` commit
 
 or only for the launcher: `ARGON_COMMAND=(claude --settings '{"attribution":{"commit":"","pr":"","sessionUrl":false}}')`. Other agents have their own switches, if any.
 
+## Fewer Touch ID prompts
+
+Keys kept in 1Password are read through the desktop app, which asks for Touch ID about once an hour per running agent. With a few agents going that adds up. A **1Password service account** removes the prompts: it authenticates with a token instead of a human.
+
+1. Create a vault for the app keys only, for example `Argon Agents`, and move each key item into it (right-click the item → Move, or `op item move`).
+2. On 1Password.com → **Developer** → **Service accounts**, create one named for this tool, grant it **read only** on that vault, and nothing else. Service accounts cannot be edited after creation, so grant the narrowest access you can up front.
+3. Save the token, once, to `~/.config/argon-agents/op.token` and lock it down:
+
+```bash
+umask 077 && mkdir -p ~/.config/argon-agents
+printf 'Service account token: '; read -rs t; printf '\n'   # read without -p: zsh reads -p as "coprocess"
+printf '%s\n' "$t" > ~/.config/argon-agents/op.token && unset t
+```
+
+Verify what you wrote, without printing the token: `head -c 4 ~/.config/argon-agents/op.token` should show `ops_`.
+
+Nothing else to do. The launcher finds the file, passes the token to each `op read` on its own, and never exports it, so it stays out of the agent's environment and out of anything the agent spawns. A token file that is readable by anyone else, empty, or not a regular file is refused outright rather than silently falling back to a prompt, so a mistake surfaces at launch instead of an hour later. To go back, delete `op.token`.
+
+**What this gives up.** The token is long-lived and does not expire on its own: anyone who can read that one file can read every app key in the vault, for as long as it exists. That is a wider blast radius than Touch ID, which is the trade for not being interrupted. Mitigations: keep only app keys in that vault, keep the file at `600`, and revoke the service account on 1Password.com when you no longer want it. Rotating means creating a new one — permissions are immutable — and replacing the file.
+
+**Use ID-based secret references.** Per 1Password's [rate limit docs](https://www.1password.dev/service-accounts/rate-limits), `op read` costs 3 requests when given a vault and item *name*, and 1 when given their *IDs*. On 1Password Teams and Families accounts the daily limit is **1,000 requests for the whole account**, shared by every service account in it — the Business limit is 50,000. The launcher reads each key roughly once an hour per agent, so 7 agents cost about 500 requests a day by name (half the budget, and shared with anything else in the account) or about 170 by ID. To build an ID-based reference, copy the reference from 1Password and substitute the IDs:
+
+```
+op://<vault-id>/<item-id>/private key
+```
+
 ## Usage
 
 ```bash
@@ -123,6 +149,9 @@ To add or rename an agent, add or rename its config, then re-run `./install.sh` 
 |---|---|
 | Commits show your personal name | The agent was started as `claude`, not through its launcher (`argon-claude`). |
 | `could not read the private key from 1Password` | Run `op account list`; if empty, connect the CLI to the desktop app. Re-copy the secret reference. |
+| `op.token must be chmod 600` | `chmod 600 ~/.config/argon-agents/op.token`, or delete it to go back to Touch ID. |
+| `op.token is empty` / `is not a regular file` | Delete `op.token` to go back to 1Password app authentication, or write the token to it again. |
+| `(429) Too Many Requests` from `op read` | The account hit its daily service account limit. Switch the refs to ID form, or revoke unused service accounts. |
 | `GitHub rejected app …` | Wrong App ID or key, or the clock is off. |
 | `app … has N installations` | Set `ARGON_OWNER` in the agent's config. |
 | `gh in zsh: WARNING` | A shell startup file prepends another `gh` before the shim; make it append to `PATH` instead. |
