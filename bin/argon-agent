@@ -11,11 +11,17 @@
 # optionally the account the app is installed on). Inside an agent session, git asks this script for
 # credentials (credential helper) and `gh` goes through a shim that sets GH_TOKEN, so tokens are minted
 # on demand and never expire mid-session.
+#
+# A private key in 1Password is read through the desktop app, which asks for Touch ID once an hour per
+# agent. To avoid that, put an op.token (0600) beside the configs: a 1Password service account token
+# scoped to a vault holding only these app keys. It is passed to each `op read` on its own and never
+# exported, so it stays out of the agent's environment. See README, "Fewer Touch ID prompts".
 set -euo pipefail
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/argon-agents"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/argon-agents"   # non-secret app metadata
 TOKEN_DIR="${TMPDIR:-/tmp}/argon-agents-$(id -u)"          # installation tokens, directory 0700
+OP_TOKEN_FILE="$CONFIG_DIR/op.token"                       # optional 1Password service account token, 0600
 SHIM_DIR="$HOME/.local/share/argon-agents/shims"
 PREFIX_FILE="$HOME/.local/share/argon-agents/prefix"             # launcher prefix, written by install.sh
 SELF="$(realpath "${BASH_SOURCE[0]}")"
@@ -23,7 +29,7 @@ SELF="$(realpath "${BASH_SOURCE[0]}")"
 die() { echo "argon-agent: $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,13s/^# \{0,1\}//p' "$SELF"
+  sed -n '2,18s/^# \{0,1\}//p' "$SELF"
   exit 1
 }
 
@@ -41,12 +47,35 @@ load_config() {
 
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 
+# A service account token is a long-lived credential for every app key in its vault. Refuse one that
+# anyone else can read, rather than silently falling back to a Touch ID prompt that hides the mistake.
+# Checked here, outside $(...), so `die` ends the script instead of just a subshell.
+# `ls -ldL` is used rather than `stat` because its output is the same on macOS and Linux, where stat's
+# flags differ (-f means --file-system on GNU). -L dereferences, so a symlinked token is judged by the
+# file it points at; the trailing -rw------- is the portable "owner only" form.
+check_op_token() {
+  [[ -e $OP_TOKEN_FILE ]] || return 0
+  [[ -f $OP_TOKEN_FILE ]] || die "$OP_TOKEN_FILE is not a regular file; remove it to go back to 1Password app authentication"
+  [[ -s $OP_TOKEN_FILE ]] || die "$OP_TOKEN_FILE is empty; save the service account token there, or remove it to go back to 1Password app authentication"
+  local perms
+  perms=$(ls -ldL "$OP_TOKEN_FILE") || die "could not read the 1Password service account token ($OP_TOKEN_FILE)"
+  [[ ${perms:0:10} == -rw------- ]] || die "$OP_TOKEN_FILE must be chmod 600 (is ${perms:1:9}); refusing to use a service account token other users can read"
+}
+
+# Reads a secret reference. When a service account token is present, it is passed to this one `op read`
+# only: it is never exported, so it stays out of the agent's environment and out of anything it spawns.
+op_read() {
+  [[ -e $OP_TOKEN_FILE ]] || { op read "$@"; return; }   # no token: fall back to 1Password app auth
+  OP_SERVICE_ACCOUNT_TOKEN=$(< "$OP_TOKEN_FILE") op read "$@"
+}
+
 # Sets JWT: a ≤10 minute token proving "I am this GitHub App", signed with the app's private key.
 ensure_jwt() {
   [[ -n ${JWT:-} ]] && return
   local key now header payload signature
   if [[ $ARGON_KEY_REF == op://* ]]; then
-    key=$(op read "$ARGON_KEY_REF") || die "could not read the private key from 1Password ($ARGON_KEY_REF)"
+    check_op_token
+    key=$(op_read "$ARGON_KEY_REF") || die "could not read the private key from 1Password ($ARGON_KEY_REF)"
   else
     key=$(cat "${ARGON_KEY_REF/#\~/$HOME}") || die "could not read the private key file ($ARGON_KEY_REF)"
   fi
