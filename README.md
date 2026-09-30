@@ -57,6 +57,8 @@ argon-claude
 
 Git is configured through `GIT_CONFIG_*` environment variables only: inherited credential helpers (such as macOS `osxkeychain`) are cleared, and `git@github.com:` remotes are rewritten to HTTPS, because installation tokens don't work over SSH. Since `git` and `gh` ask for a token on every use, sessions longer than an hour keep working.
 
+`gh` is also pointed at an empty config directory (`GH_CONFIG_DIR`), so a `gh` that bypasses the shim finds no login and fails instead of acting as you. That happens when a shell startup file puts another `gh` ahead of the shim on `PATH`, for example `brew shellenv` in `~/.zprofile` in the login shells Codex runs its commands in; `argon-agent check` reports it.
+
 **Not a sandbox.** The agent still runs as your user and could deliberately use your SSH key. This prevents an agent from *accidentally* acting as you; it doesn't stop a malicious one.
 
 ## Setup
@@ -154,5 +156,7 @@ To add or rename an agent, add or rename its config, then re-run `./install.sh` 
 | `(429) Too Many Requests` from `op read` | The account hit its daily service account limit. Switch the refs to ID form, or revoke unused service accounts. |
 | `GitHub rejected app …` | Wrong App ID or key, or the clock is off. |
 | `app … has N installations` | Set `ARGON_OWNER` in the agent's config. |
-| `gh in zsh: WARNING` | A shell startup file prepends another `gh` before the shim; make it append to `PATH` instead. |
+| `gh in zsh -i: FAILED` | A shell startup file (`~/.zshrc`) prepends another `gh` before the shim; make it append to `PATH` instead. |
+| `gh in zsh -l: WARNING`, or `gh` asks for `gh auth login` in Codex | A login-shell startup file (`~/.zprofile`, often `brew shellenv`) puts another `gh` before the shim, and Codex runs its commands in login shells. Add this at the end of `~/.zprofile` (or `~/.bash_profile`) to put the shim back in front inside agent sessions only: `[[ -n $ARGON_AGENT ]] && PATH="$HOME/.local/share/argon-agents/shims:$PATH"`. |
+| Pull requests or comments show your personal name | They were made by a launcher older than the empty `GH_CONFIG_DIR`, through a `gh` that bypassed the shim; update, then run `argon-agent check <agent>`. |
 | Anything stale | `rm -rf ~/.cache/argon-agents "$TMPDIR/argon-agents-$(id -u)"` |
