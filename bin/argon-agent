@@ -23,6 +23,7 @@ CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/argon-agents"   # non-secret app meta
 TOKEN_DIR="${TMPDIR:-/tmp}/argon-agents-$(id -u)"          # installation tokens, directory 0700
 OP_TOKEN_FILE="$CONFIG_DIR/op.token"                       # optional 1Password service account token, 0600
 SHIM_DIR="$HOME/.local/share/argon-agents/shims"
+GH_CONFIG_EMPTY="$CACHE_DIR/gh-config"                           # gh config dir for sessions: no accounts
 PREFIX_FILE="$HOME/.local/share/argon-agents/prefix"             # launcher prefix, written by install.sh
 SELF="$(realpath "${BASH_SOURCE[0]}")"
 
@@ -180,13 +181,19 @@ run() {
   export PATH="$SHIM_DIR:$PATH"
   unset GH_TOKEN GITHUB_TOKEN
 
+  # A login shell's startup files can put another gh ahead of the shim (brew shellenv, path_helper), and
+  # agents such as Codex run commands in one. Give gh a config directory with no accounts, so a gh that
+  # bypasses the shim fails instead of falling back to your own login. The shim's GH_TOKEN doesn't need it.
+  mkdir -p "$GH_CONFIG_EMPTY" || die "could not create $GH_CONFIG_EMPTY"
+  export GH_CONFIG_DIR=$GH_CONFIG_EMPTY
+
   token > /dev/null   # mint now, so any 1Password prompt appears at launch rather than mid-session
   exec "${ARGON_COMMAND[@]}" "$@"
 }
 
 # Runs inside the agent environment (via `check`) and tests what an agent would actually get.
 verify() {
-  local ok=1 repos repo shell shell_gh
+  local ok=1 repos repo login shell mode label shell_gh
   echo "git author:     $(git var GIT_AUTHOR_IDENT | sed 's/ [0-9]* [-+][0-9]*$//')"
   echo "git committer:  $(git var GIT_COMMITTER_IDENT | sed 's/ [0-9]* [-+][0-9]*$//')"
   if repos=$(gh api /installation/repositories --jq '"\(.total_count) \(.repositories[0].full_name // "")"' 2>/dev/null); then
@@ -202,13 +209,25 @@ verify() {
   else
     echo "git auth:       FAILED (on $repo)"; ok=0
   fi
-  shell=$(basename "${SHELL:-zsh}")
-  shell_gh=$("$shell" -ic 'command -v gh' 2>/dev/null | tail -1)
-  if [[ $shell_gh == "$SHIM_DIR/gh" ]]; then
-    echo "gh in $shell:$(printf '%*s' $((9 - ${#shell})) '')ok (shim)"
+  if login=$("$ARGON_REAL_GH" api user --jq .login 2>/dev/null); then
+    echo "gh fallback:    FAILED (gh without the shim still acts as $login)"; ok=0
   else
-    echo "gh in $shell:  WARNING: an interactive $shell resolves gh to $shell_gh, so your shell startup file puts it before the shim"; ok=0
+    echo "gh fallback:    ok (gh without the shim has no login)"
   fi
+  # Interactive shells read ~/.zshrc or ~/.bashrc; login shells, which Codex runs its commands in, also read
+  # ~/.zprofile or ~/.bash_profile. Agents that don't use login shells are unaffected by the latter, so it only warns.
+  shell=$(basename "${SHELL:-zsh}")
+  for mode in i l; do
+    label="gh in $shell -$mode:"
+    shell_gh=$("$shell" "-${mode}c" 'command -v gh' 2>/dev/null | tail -1)
+    if [[ $shell_gh == "$SHIM_DIR/gh" ]]; then
+      printf '%-16s%s\n' "$label" "ok (shim)"
+    elif [[ $mode == i ]]; then
+      printf '%-16s%s\n' "$label" "FAILED: an interactive $shell resolves gh to $shell_gh, so your shell startup file puts it before the shim"; ok=0
+    else
+      printf '%-16s%s\n' "$label" "WARNING: a login $shell resolves gh to $shell_gh, so gh fails in agents that run commands in login shells, such as Codex; see README, Troubleshooting"
+    fi
+  done
   (( ok )) && echo "identity:       consistent" || exit 1
 }
 
