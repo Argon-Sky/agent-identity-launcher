@@ -16,6 +16,7 @@ import unittest
 
 
 REPO = Path(__file__).resolve().parents[1]
+OP_TOKEN = "ops_synthetic_service_account_token"
 BASH = "/bin/bash"
 
 FAKE_CODEX = r'''
@@ -74,6 +75,10 @@ elif args[:2] == ["app-server", "proxy"]:
                 environment["GH_TOKEN"] = "synthetic-stale-token"
             if scenario == "stale_github_token":
                 environment["GITHUB_TOKEN"] = "synthetic-stale-token"
+            if scenario == "missing_op_token":
+                environment.pop("OP_SERVICE_ACCOUNT_TOKEN", None)
+            if scenario == "replaced_op_token":
+                environment["OP_SERVICE_ACCOUNT_TOKEN"] = "ops_synthetic_replaced_token"
             if scenario == "wrong_gh":
                 environment["PATH"] = os.pathsep.join(part for part in environment["PATH"].split(os.pathsep) if not part.endswith("/argon-agents/shims"))
             completed = subprocess.run(request["params"]["command"], env=environment, capture_output=True, text=True)
@@ -85,7 +90,7 @@ elif args[:2] == ["app-server", "proxy"]:
         print(json.dumps({"id":request["id"], "result":result}), flush=True)
 else:
     identity = {key:value for key,value in os.environ.items() if key.startswith("GIT_") or key in ("ARGON_AGENT", "ARGON_REAL_GH", "GH_CONFIG_DIR")}
-    log("attached", args=args, identity=identity, codex_home=os.environ.get("CODEX_HOME"), sqlite_home=os.environ.get("CODEX_SQLITE_HOME"), tokens_present=any(key in os.environ for key in ("GH_TOKEN", "GITHUB_TOKEN")))
+    log("attached", args=args, identity=identity, codex_home=os.environ.get("CODEX_HOME"), sqlite_home=os.environ.get("CODEX_SQLITE_HOME"), tokens_present=any(key in os.environ for key in ("GH_TOKEN", "GITHUB_TOKEN")), op_token=os.environ.get("OP_SERVICE_ACCOUNT_TOKEN"))
 '''
 
 
@@ -132,8 +137,16 @@ class LauncherTests(unittest.TestCase):
         environment.update(extra_env or {})
         completed = subprocess.run([BASH, str(REPO / "bin/argon-agent"), operation, "test", *arguments], env=environment, cwd=cwd, capture_output=True, text=True, timeout=30)
         self.assertNotIn("ghs_synthetic_offline_test", completed.stdout + completed.stderr)
+        self.assertNotIn(OP_TOKEN, completed.stdout + completed.stderr)
         self.assertFalse(list(self.tmp.glob("argon-codex.*")), "connection pipes must be cleaned after success or failure")
         return completed
+
+    def opt_in_session_token(self, mode=0o600, content=OP_TOKEN + "\n"):
+        with (self.config / "test.env").open("a") as config:
+            config.write("ARGON_OP_SESSION_TOKEN=1\n")
+        token = self.config / "op.token"
+        token.write_text(content)
+        token.chmod(mode)
 
     def events(self, event=None):
         values = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
@@ -389,6 +402,61 @@ class LauncherTests(unittest.TestCase):
                 result = self.launch(*(() if configured else ("--no-daemon",)))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.events("attached")[0]["args"], ["--no-daemon"])
+
+    def test_session_token_is_exported_only_when_opted_in(self):
+        (self.config / "op.token").write_text(OP_TOKEN + "\n")
+        (self.config / "op.token").chmod(0o600)
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(self.events("attached")[0]["op_token"])
+        self.log.unlink()
+        self.opt_in_session_token()
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.events("attached")[0]["op_token"], OP_TOKEN)
+
+    def test_session_token_reaches_the_remote_codex_server(self):
+        self.configure(remote=1)
+        self.opt_in_session_token()
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.events("attached")[0]["op_token"], OP_TOKEN)
+        self.assertIn("remoteControl/enable", [event["method"] for event in self.events("rpc")])
+
+    def test_remote_refuses_a_server_without_the_current_session_token(self):
+        self.configure(remote=1)
+        self.opt_in_session_token()
+        for scenario in ("missing_op_token", "replaced_op_token"):
+            with self.subTest(scenario=scenario):
+                self.log.unlink(missing_ok=True)
+                self.assert_refused(self.launch(scenario=scenario), "different GitHub identity or credential environment")
+                self.assertNotIn("remoteControl/enable", [event["method"] for event in self.events("rpc")])
+
+    def test_session_token_opt_in_refuses_an_unusable_token_file(self):
+        cases = (("missing", "needs a 1Password service account token"), ("empty", "is empty"), ("readable", "must be chmod 600"), ("directory", "is not a regular file"))
+        for case, message in cases:
+            with self.subTest(case=case):
+                self.log.unlink(missing_ok=True)
+                self.configure()
+                token = self.config / "op.token"
+                if token.is_dir():
+                    token.rmdir()
+                token.unlink(missing_ok=True)
+                if case == "directory":
+                    with (self.config / "test.env").open("a") as config:
+                        config.write("ARGON_OP_SESSION_TOKEN=1\n")
+                    token.mkdir()
+                else:
+                    self.opt_in_session_token(mode=0o644 if case == "readable" else 0o600, content="" if case == "empty" else OP_TOKEN + "\n")
+                    if case == "missing":
+                        token.unlink()
+                self.assert_refused(self.launch(), message)
+                self.assertEqual(self.events(), [])
+
+    def test_session_token_setting_must_be_0_or_1(self):
+        with (self.config / "test.env").open("a") as config:
+            config.write("ARGON_OP_SESSION_TOKEN=yes\n")
+        self.assert_refused(self.launch(), "ARGON_OP_SESSION_TOKEN must be 0 or 1")
 
     def test_install_is_repeatable_in_throwaway_home(self):
         original_config = (self.config / "test.env").read_bytes()

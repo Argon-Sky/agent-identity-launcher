@@ -150,12 +150,13 @@ codex_remote_socket() (
   codex_rpc 1 initialize '{"clientInfo":{"name":"argon-agent","version":"1"},"capabilities":{"experimentalApi":true}}'
   printf '%s\n' '{"method":"initialized"}' >&3
 
-  # Only non-secret identity fields leave the server. Token variables are tested for absence, never read out.
-  # Use the same executable for both probes so a different server PATH cannot substitute jq.
+  # Only non-secret identity fields leave the server. GitHub token variables are tested for absence, never read out.
+  # The 1Password service account token leaves only as a SHA-256 fingerprint, so a server that predates the
+  # token, or a replaced one, is refused. Use the same jq and openssl for both probes so a different server PATH cannot substitute them.
   # shellcheck disable=SC2016 # This script is expanded in the probed shell, not the launcher.
-  probe='"$1" -cn --arg gh "$(command -v gh)" '\''{identity:(env | with_entries(select(.key | test("^(ARGON_AGENT|ARGON_REAL_GH|GIT_AUTHOR_NAME|GIT_AUTHOR_EMAIL|GIT_COMMITTER_NAME|GIT_COMMITTER_EMAIL|GIT_CONFIG_COUNT|GIT_CONFIG_KEY_[0-2]|GIT_CONFIG_VALUE_[0-2]|GH_CONFIG_DIR)$")))),gh:$gh,noTokens:((env | has("GH_TOKEN") or has("GITHUB_TOKEN")) | not)}'\'''
-  expected=$(/bin/sh -c "$probe" argon-probe "$(command -v jq)") || die "could not inspect the launcher identity"
-  codex_rpc 2 command/exec "$(jq -cn --arg probe "$probe" --arg jq "$(command -v jq)" '{command:["/bin/sh","-c",$probe,"argon-probe",$jq],sandboxPolicy:{type:"dangerFullAccess"},timeoutMs:5000,outputBytesCap:16384}')"
+  probe='"$1" -cn --arg gh "$(command -v gh)" --arg op "$(if [ -n "${OP_SERVICE_ACCOUNT_TOKEN+set}" ]; then printf %s "$OP_SERVICE_ACCOUNT_TOKEN" | "$2" dgst -sha256 -r; fi)" '\''{identity:(env | with_entries(select(.key | test("^(ARGON_AGENT|ARGON_REAL_GH|GIT_AUTHOR_NAME|GIT_AUTHOR_EMAIL|GIT_COMMITTER_NAME|GIT_COMMITTER_EMAIL|GIT_CONFIG_COUNT|GIT_CONFIG_KEY_[0-2]|GIT_CONFIG_VALUE_[0-2]|GH_CONFIG_DIR)$")))),gh:$gh,opToken:$op,noTokens:((env | has("GH_TOKEN") or has("GITHUB_TOKEN")) | not)}'\'''
+  expected=$(/bin/sh -c "$probe" argon-probe "$(command -v jq)" "$(command -v openssl)") || die "could not inspect the launcher identity"
+  codex_rpc 2 command/exec "$(jq -cn --arg probe "$probe" --arg jq "$(command -v jq)" --arg openssl "$(command -v openssl)" '{command:["/bin/sh","-c",$probe,"argon-probe",$jq,$openssl],sandboxPolicy:{type:"dangerFullAccess"},timeoutMs:5000,outputBytesCap:16384}')"
   actual=$(jq -ce 'select(.exitCode == 0) | .stdout | fromjson' <<< "$response") || die "could not inspect the Codex server identity"
   jq -en --argjson expected "$expected" --argjson actual "$actual" '$expected == $actual and $actual.noTokens' > /dev/null ||
     die "the bot Codex server has a different GitHub identity or credential environment. Finish its active work, stop it yourself with 'argon-agent codex $AGENT app-server daemon stop', then launch again. No server was stopped or remote access enabled by this launch"
