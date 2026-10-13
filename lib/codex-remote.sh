@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Sourced by argon-agent only for opt-in Codex remote mode. Requires bash 3.2 and jq.
+# Sourced by argon-agent only for opt-in Codex remote mode. Requires bash 3.2, jq and websocat 1.x.
 
-# Reuse Codex's lifecycle lock and JSONL proxy. Never restart an existing server: it may own active work.
+# Reuse Codex's lifecycle lock and websocat's WebSocket-over-Unix transport. Never restart an existing server.
 # Check the server over the same connection used to enable remote access, before attaching the TUI.
 codex_remote_socket() (
   local codex=$1 check_only=${2:-0} lifecycle socket response expected actual probe deadline remaining line
@@ -23,7 +23,7 @@ codex_remote_socket() (
   trap cleanup_codex_proxy EXIT
   trap 'exit 1' HUP INT TERM
   mkfifo "$codex_proxy_dir/in" "$codex_proxy_dir/out" || die "could not create the Codex connection pipes"
-  "$codex" app-server proxy --sock "$socket" < "$codex_proxy_dir/in" > "$codex_proxy_dir/out" 2> "$codex_proxy_dir/error" &
+  websocat -t --ws-c-uri ws://localhost/ - "ws-c:unix:$socket" < "$codex_proxy_dir/in" > "$codex_proxy_dir/out" 2> "$codex_proxy_dir/error" &
   codex_proxy_pid=$!
   exec 3> "$codex_proxy_dir/in" 4< "$codex_proxy_dir/out"
 

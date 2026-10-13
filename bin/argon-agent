@@ -189,6 +189,7 @@ run() {
     die "${ARGON_COMMAND[0]} resolves to this launcher; pick a launcher prefix that doesn't shadow the agent's command"
 
   if [[ $ARGON_CODEX_REMOTE == 1 ]]; then
+    command -v websocat > /dev/null || die "Codex remote mode needs websocat 1.x (on macOS: brew install websocat)"
     local arg
     for arg in "${ARGON_COMMAND[@]:1}" "$@"; do
       [[ $arg == -- ]] && break
@@ -200,10 +201,10 @@ run() {
     local version
     version=$("$target" --version) || die "could not read the Codex version"
     version=${version#codex-cli }
-    if ! [[ $version =~ ^0\.([0-9]+)\.([0-9]+)$ ]]; then
+    if ! [[ $version =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
       die "remote mode requires stable Codex CLI 0.162.1 or newer (found $version)"
     fi
-    if ! (( BASH_REMATCH[1] > 162 || (BASH_REMATCH[1] == 162 && BASH_REMATCH[2] >= 1) )); then
+    if ! (( 10#${BASH_REMATCH[1]} > 0 || 10#${BASH_REMATCH[2]} > 162 || (10#${BASH_REMATCH[2]} == 162 && 10#${BASH_REMATCH[3]} >= 1) )); then
       die "remote mode requires stable Codex CLI 0.162.1 or newer (found $version)"
     fi
     codex_home
@@ -255,9 +256,13 @@ run() {
   # Newer Codex CLIs otherwise attach to a server with somebody else's environment.
   # Keep standalone launches under this process's identity, including when a server exists.
   if [[ $(basename "${ARGON_COMMAND[0]}") == codex ]]; then
-    local help
+    local help arg has_no_daemon=0
+    for arg in "${ARGON_COMMAND[@]:1}" "$@"; do
+      [[ $arg == -- ]] && break
+      [[ $arg == --no-daemon ]] && has_no_daemon=1
+    done
     help=$("$target" --help) || die "could not inspect Codex's standalone options"
-    if grep -q -- --no-daemon <<< "$help"; then
+    if [[ $has_no_daemon == 0 ]] && grep -q -- --no-daemon <<< "$help"; then
       exec "$target" --no-daemon "${ARGON_COMMAND[@]:1}" "$@"
     fi
   fi

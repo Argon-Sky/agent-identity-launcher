@@ -63,7 +63,7 @@ Git is configured through `GIT_CONFIG_*` environment variables only: inherited c
 
 ### Codex remote control
 
-Codex CLI 0.162.1 or later can share a background server between the terminal and ChatGPT remote control. That server keeps the environment it started with, so attaching a launcher to a personal server would lose the launcher's GitHub identity. Standalone Codex launches use `--no-daemon` when the installed CLI supports it.
+Codex CLI 0.162.1 or later can share a background server between the terminal and ChatGPT remote control. That server keeps the environment it started with, so attaching a launcher to a personal server would lose the launcher's GitHub identity. Standalone Codex launches use `--no-daemon` when the installed CLI supports it. Remote mode additionally requires [websocat 1.x](https://github.com/vi/websocat) (`brew install websocat` on macOS), which handles Codex's WebSocket transport over a local Unix socket.
 
 To use remote control, opt in in your Codex agent config:
 
@@ -79,6 +79,7 @@ For a config named `codex.env`, set up the bot server once:
 ```bash
 argon-agent codex codex login                     # sign in to the ChatGPT account used on your phone
 argon-agent check codex                           # check the server identity and GitHub access
+argon-agent codex codex remote-control             # enable remote access on the running bot server
 argon-agent codex codex remote-control pair        # pair this bot server with ChatGPT
 argon-codex                                       # start a remotely accessible session
 ```
@@ -201,4 +202,4 @@ To add or rename an agent, add or rename its config, then re-run `./install.sh` 
 
 ## Development checks
 
-Run `shellcheck bin/argon-agent install.sh lib/codex-remote.sh` and `python3 -m unittest discover -s tests -v`. The regression suite uses temporary homes, fake GitHub metadata and tokens, and a fake Codex executable; it needs Python 3 for tests only and never contacts GitHub or reads real credentials. On macOS, `/bin/bash` exercises the supported Bash 3.2 runtime. Real server and phone checks are separate: launch with a test bot home, verify its identity with `check`, and connect ChatGPT to that bot server before treating remote access as proven.
+Run `shellcheck bin/argon-agent install.sh lib/codex-remote.sh` and `python3 -m unittest discover -s tests -v`. The offline regression suite uses temporary homes, fake GitHub metadata and tokens, and fake executables; it needs Python 3 for tests only and never contacts GitHub or reads real credentials. On macOS, `/bin/bash` exercises the supported Bash 3.2 runtime. With Codex and websocat installed, run `ARGON_TEST_CODEX="$(command -v codex)" python3 -m unittest discover -s tests -p test_codex_live.py -v` for isolated real-server checks without account credentials or model calls. Phone verification is separate: launch with a bot home, verify its identity with `check`, and connect ChatGPT to that bot server before treating remote access as proven.

@@ -27,6 +27,11 @@ scenario = os.environ.get("FAKE_SCENARIO", "")
 def log(event, **data):
     with open(os.environ["FAKE_LOG"], "a") as stream:
         stream.write(json.dumps(dict(event=event, **data)) + "\n")
+if Path(sys.argv[0]).name == "websocat":
+    log("transport", args=args)
+    if args != ["-t", "--ws-c-uri", "ws://localhost/", "-", "ws-c:unix:" + os.environ["FAKE_SOCKET"]]:
+        sys.exit(96)
+    args = ["app-server", "proxy"]
 log("call", args=args)
 if args == ["--version"]:
     print("codex-cli " + os.environ.get("FAKE_VERSION", "0.162.1"))
@@ -100,6 +105,7 @@ class LauncherTests(unittest.TestCase):
         self.env = {key:value for key,value in os.environ.items() if not key.startswith(("ARGON_", "GIT_", "CODEX_", "OP_")) and key not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR")}
         self.env.update(HOME=str(self.home), XDG_CONFIG_HOME="", XDG_CACHE_HOME="", TMPDIR=str(self.tmp), PATH=str(self.tools) + os.pathsep + os.environ["PATH"], FAKE_LOG=str(self.log), FAKE_SOCKET=str(self.tmp / "server.sock"))
         self.write_tool("codex", FAKE_CODEX)
+        self.write_tool("websocat", FAKE_CODEX)
         self.write_tool("other-agent", FAKE_CODEX)
         self.write_tool("gh", "import sys\nsys.exit(0)\n")
         # Unexpected credential/network access fails immediately instead of contacting GitHub.
@@ -285,6 +291,15 @@ class LauncherTests(unittest.TestCase):
         result = self.launch(scenario="large_help")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.events("attached")[0]["args"], ["--no-daemon"])
+
+    def test_explicit_standalone_flag_is_not_duplicated(self):
+        for configured in (False, True):
+            with self.subTest(configured=configured):
+                self.log.unlink(missing_ok=True)
+                self.configure(arguments=("--no-daemon",) if configured else ())
+                result = self.launch(*(() if configured else ("--no-daemon",)))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.events("attached")[0]["args"], ["--no-daemon"])
 
     def test_install_is_repeatable_in_throwaway_home(self):
         original_config = (self.config / "test.env").read_bytes()

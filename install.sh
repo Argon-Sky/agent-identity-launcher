@@ -67,14 +67,22 @@ echo
 echo "Prerequisites:"
 # Whether any config needs the 1Password CLI at all, so the warnings below only fire when it is used.
 uses_op=0
+uses_codex_remote=0
 for env in "$CONFIG"/*.env; do
   grep -q '^ARGON_KEY_REF="\?op://' "$env" 2> /dev/null && uses_op=1
+  grep -Eq "^ARGON_CODEX_REMOTE=['\"]?1(['\"]|[[:space:]]|$)" "$env" 2> /dev/null && uses_codex_remote=1
 done
 # Without the shim dir, so a run from inside an agent session reports the real gh, not the shim.
 TOOL_PATH=${PATH//"$SHIMS:"/}
-for tool in git curl openssl jq gh op; do
+for tool in git curl openssl jq gh op websocat; do
   if PATH=$TOOL_PATH command -v "$tool" > /dev/null; then
     printf '  %-8s %s\n' "$tool" "$(PATH=$TOOL_PATH command -v "$tool")"
+  elif [[ $tool == websocat ]]; then
+    if (( uses_codex_remote )); then
+      printf '  %-8s MISSING (Codex remote mode needs websocat 1.x; brew install websocat)\n' "$tool"
+    else
+      printf '  %-8s not installed (optional: needed only for Codex remote mode)\n' "$tool"
+    fi
   elif [[ $tool == op ]]; then
     if (( uses_op )); then
       printf '  %-8s MISSING (a config reads its key from 1Password; or use a key file, see README)\n' "$tool"
