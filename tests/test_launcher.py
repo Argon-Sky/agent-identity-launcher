@@ -193,12 +193,37 @@ class LauncherTests(unittest.TestCase):
 
     def test_codex_management_uses_bot_home_without_attaching_or_enabling(self):
         self.configure(remote=1, arguments=("--yolo",))
-        result = self.launch("app-server", "daemon", "status", operation="codex")
+        result = self.launch("app-server", "daemon", "version", operation="codex")
         self.assertEqual(result.returncode, 0, result.stderr)
         attachment = self.events("attached")[0]
-        self.assertEqual(attachment["args"], ["app-server", "daemon", "status"])
+        self.assertEqual(attachment["args"], ["app-server", "daemon", "version"])
         self.assertEqual(attachment["codex_home"], str(self.home / ".codex-argon/test"))
         self.assertEqual(self.events("rpc"), [])
+
+    def test_codex_management_checks_identity_before_enabling_or_pairing(self):
+        self.configure(remote=1)
+        commands = (("remote-control",), ("remote-control", "start"), ("remote-control", "pair"), ("remote-control", "--json", "pair"), ("--config", "test=true", "remote-control", "start"), ("app-server", "daemon", "enable-remote-control"), ("app-server", "daemon", "start"))
+        for arguments in commands:
+            with self.subTest(arguments=arguments):
+                self.log.unlink(missing_ok=True)
+                result = self.launch(*arguments, operation="codex")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("command/exec", [event["method"] for event in self.events("rpc")])
+                self.assertNotIn("remoteControl/enable", [event["method"] for event in self.events("rpc")])
+                self.log.unlink(missing_ok=True)
+                self.assert_refused(self.launch(*arguments, operation="codex", scenario="wrong_identity"), "different GitHub identity")
+                self.assertNotIn("remoteControl/enable", [event["method"] for event in self.events("rpc")])
+
+    def test_codex_recovery_commands_remain_available_with_a_mismatched_server(self):
+        self.configure(remote=1, arguments=("--yolo",))
+        commands = (("login", "status"), ("logout",), ("app-server", "daemon", "version"), ("app-server", "daemon", "stop"), ("app-server", "daemon", "disable-remote-control"), ("remote-control", "stop"))
+        for arguments in commands:
+            with self.subTest(arguments=arguments):
+                self.log.unlink(missing_ok=True)
+                result = self.launch(*arguments, operation="codex", scenario="wrong_identity")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.events("rpc"), [])
+                self.assertEqual(self.events("attached")[0]["args"], list(arguments))
 
     def test_remote_refuses_unsafe_home_overrides(self):
         self.configure(remote=1)

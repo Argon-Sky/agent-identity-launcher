@@ -10,7 +10,9 @@ import json
 import os
 from pathlib import Path
 import selectors
+import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -102,6 +104,17 @@ class LiveCodexTests(unittest.TestCase):
     def stop_daemon(self):
         result = self.command("app-server", "daemon", "stop")
         self.assertEqual(result.returncode, 0, "could not stop the isolated test daemon")
+        # Codex 0.162.1 leaves its package updater running after daemon stop, even if the home is removed.
+        # Discover only this test home's updater, then stop that specific PID before removing the home.
+        prefix = str(self.codex_home / "packages/app-server-daemon/releases") + "/"
+        processes = subprocess.check_output(["ps", "-axo", "pid=,command="], text=True)
+        for line in processes.splitlines():
+            pid, command = line.strip().split(None, 1)
+            if command.startswith(prefix) and command.endswith(" app-server daemon pid-update-loop"):
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
 
     def verify_server(self, environment):
         script = 'set -euo pipefail\nAGENT=$ARGON_AGENT\ndie() { printf "argon-agent: %s\\n" "$*" >&2; exit 1; }\nsource "$1"\ncodex_remote_socket "$2" 1\n'
@@ -135,6 +148,27 @@ class LiveCodexTests(unittest.TestCase):
         read = second.request("thread/read", {"threadId":thread_id, "includeTurns":False})
         self.assertEqual(read["thread"]["id"], thread_id)
         self.assertEqual(read["thread"]["turns"], [])
+        self.assertFalse((self.codex_home / "auth.json").exists())
+
+    def test_management_refuses_mismatched_real_server_but_keeps_recovery_available(self):
+        config = self.home / ".config/argon-agents"
+        cache = self.home / ".cache/argon-agents"
+        tokens = self.home / ("argon-agents-" + str(os.getuid()))
+        for directory in (config, cache, tokens):
+            directory.mkdir(mode=0o700, parents=True)
+        (config / "live-test.env").write_text('ARGON_APP_ID="synthetic-test"\nARGON_KEY_REF="/does-not-exist"\nARGON_COMMAND=(' + shlex.quote(CODEX) + ')\nARGON_CODEX_REMOTE=1\nARGON_CODEX_HOME=' + shlex.quote(str(self.codex_home)) + '\n')
+        # Deliberately different from the already-running server's identity.
+        (cache / "live-test.meta").write_text('META_KEY="synthetic-test/"\nAPP_SLUG="different-test"\nINSTALLATION_ID="synthetic"\nBOT_EMAIL="different@example.invalid"\n')
+        (tokens / "live-test.token").write_text(str(int(time.time()) + 3600) + " ghs_synthetic_offline_test\n")
+        for arguments in (("remote-control",), ("remote-control", "pair"), ("app-server", "daemon", "enable-remote-control")):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(["/bin/bash", str(REPO / "bin/argon-agent"), "codex", "live-test", *arguments], env=self.env, cwd=self.home, capture_output=True, text=True, timeout=25)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("different GitHub identity", result.stderr)
+                self.assertNotIn("ghs_synthetic_offline_test", result.stdout + result.stderr)
+        result = subprocess.run(["/bin/bash", str(REPO / "bin/argon-agent"), "codex", "live-test", "app-server", "daemon", "version"], env=self.env, cwd=self.home, capture_output=True, text=True, timeout=25)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(list(self.home.glob("argon-codex.*")))
         self.assertFalse((self.codex_home / "auth.json").exists())
 
 

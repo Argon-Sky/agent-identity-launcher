@@ -84,7 +84,7 @@ argon-agent codex codex remote-control pair        # pair this bot server with C
 argon-codex                                       # start a remotely accessible session
 ```
 
-In `argon-agent codex <agent> ...`, `<agent>` is the config file name without `.env`. This management command runs the installed Codex CLI in that bot's environment and home, without adding your configured session flags. It can also inspect or stop that server:
+In `argon-agent codex <agent> ...`, `<agent>` is the config file name without `.env`. This management command runs the installed Codex CLI in that bot's environment and home, without adding your configured session flags. Management commands check the running server's identity before proceeding, including remote enable and pairing. Login, logout, help, version inspection, stop, and disabling remote access remain available without that check so a mismatched server can be recovered. Other management commands start the bot server if needed to perform the check. It can also inspect or stop that server:
 
 ```bash
 argon-agent codex codex app-server daemon version

@@ -238,12 +238,18 @@ run() {
 
   token > /dev/null   # mint now, so any 1Password prompt appears at launch rather than mid-session
   if [[ $ARGON_CODEX_REMOTE == 1 ]]; then
-    if [[ ${CODEX_MANAGEMENT:-0} == 1 ]]; then
-      exec "$target" "$@"
-    fi
     local socket
     # shellcheck source=lib/codex-remote.sh
     source "$(dirname "$SELF")/../lib/codex-remote.sh"
+    if [[ ${CODEX_MANAGEMENT:-0} == 1 ]]; then
+      # Keep recovery available even when an existing daemon has the wrong identity.
+      # Everything else, including enable and pairing with flags, must verify it first.
+      case ${1:-}/${2:-}/${3:-} in
+        login/*/*|logout/*/*|help/*/*|--help/*/*|-h/*/*|app-server/daemon/version|app-server/daemon/stop|app-server/daemon/disable-remote-control|remote-control/stop/*) ;;
+        *) socket=$(codex_remote_socket "$target" 1) || exit 1 ;;
+      esac
+      exec "$target" "$@"
+    fi
     socket=$(codex_remote_socket "$target" "${VERIFY_ONLY:-0}") || exit 1
     if [[ ${VERIFY_ONLY:-0} == 1 ]]; then
       exec "$SELF" _verify
