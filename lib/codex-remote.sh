@@ -59,10 +59,53 @@ codex_remote_run() {
   exec "${args[@]}" "$@"
 }
 
+# Native `codex remote-control` starts an embedded foreground server in 0.162.1.
+# Enable the verified daemon itself so the phone and terminal cannot acquire separate thread writers.
+codex_remote_manage() {
+  local codex=$1 action="" json=0 arg status
+  shift
+  if [[ ${1:-} == remote-control ]]; then
+    shift
+    for arg in "$@"; do
+      case $arg in
+        --json) json=1 ;;
+        --help|-h) exec "$codex" remote-control "$@" ;;
+        start|pair|stop)
+          [[ -z $action ]] || die "choose one remote-control action: start, pair or stop"
+          action=$arg ;;
+        *) die "unsupported remote-control argument: $arg. Use remote-control [start|pair|stop] [--json]; configure server settings in $CODEX_HOME/config.toml" ;;
+      esac
+    done
+    action=${action:-start}
+    if [[ $action == start ]]; then
+      status=$(codex_remote_socket "$codex" 0 status) || exit 1
+      if (( json )); then
+        jq -c '. + {mode:"daemon"}' <<< "$status"
+      else
+        printf 'Codex remote control: %s (%s, shared bot daemon)\n' "$(jq -r .status <<< "$status")" "$(jq -r '.serverName // "Codex"' <<< "$status")"
+      fi
+      exit 0
+    fi
+    set -- remote-control "$action"
+    (( json == 0 )) || set -- "$@" --json
+  else
+    # Do not let prefixed CLI flags reach the native foreground-server path.
+    for arg in "$@"; do
+      [[ $arg != remote-control ]] || die "put remote-control first, followed by start, pair or stop and optional --json; configure server settings in $CODEX_HOME/config.toml"
+    done
+  fi
+  # Keep recovery available even when an existing daemon has the wrong identity.
+  case ${1:-}/${2:-}/${3:-} in
+    login/*/*|logout/*/*|help/*/*|--help/*/*|-h/*/*|app-server/daemon/version|app-server/daemon/stop|app-server/daemon/disable-remote-control|remote-control/stop/*) ;;
+    *) codex_remote_socket "$codex" 1 > /dev/null || exit 1 ;;
+  esac
+  exec "$codex" "$@"
+}
+
 # Reuse Codex's lifecycle lock and websocat's WebSocket-over-Unix transport. Never restart an existing server.
 # Check the server over the same connection used to enable remote access, before attaching the TUI.
 codex_remote_socket() (
-  local codex=$1 check_only=${2:-0} lifecycle socket response expected actual probe deadline remaining line
+  local codex=$1 check_only=${2:-0} output=${3:-socket} lifecycle socket response expected actual probe deadline remaining line
   lifecycle=$("$codex" app-server daemon start) || die "could not start the Codex server"
   socket=$(jq -er '.socketPath | select(type == "string" and startswith("/") and (contains("\n") | not))' <<< "$lifecycle") ||
     die "Codex did not return an absolute server socket path"
@@ -123,5 +166,9 @@ codex_remote_socket() (
     jq -e '.status == "connected" or .status == "connecting"' > /dev/null <<< "$response" ||
       die "Codex could not enable remote control; check the server's ChatGPT login and remote-control permissions"
   fi
-  printf '%s\n' "$socket"
+  if [[ $output == status ]]; then
+    printf '%s\n' "$response"
+  else
+    printf '%s\n' "$socket"
+  fi
 )

@@ -243,17 +243,40 @@ class LauncherTests(unittest.TestCase):
 
     def test_codex_management_checks_identity_before_enabling_or_pairing(self):
         self.configure(remote=1)
-        commands = (("remote-control",), ("remote-control", "start"), ("remote-control", "pair"), ("remote-control", "--json", "pair"), ("--config", "test=true", "remote-control", "start"), ("app-server", "daemon", "enable-remote-control"), ("app-server", "daemon", "start"))
+        commands = (("remote-control",), ("remote-control", "start"), ("remote-control", "pair"), ("remote-control", "--json", "pair"), ("app-server", "daemon", "enable-remote-control"), ("app-server", "daemon", "start"))
         for arguments in commands:
             with self.subTest(arguments=arguments):
                 self.log.unlink(missing_ok=True)
                 result = self.launch(*arguments, operation="codex")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("command/exec", [event["method"] for event in self.events("rpc")])
-                self.assertNotIn("remoteControl/enable", [event["method"] for event in self.events("rpc")])
+                self.assertEqual("remoteControl/enable" in [event["method"] for event in self.events("rpc")], arguments in (("remote-control",), ("remote-control", "start")))
                 self.log.unlink(missing_ok=True)
                 self.assert_refused(self.launch(*arguments, operation="codex", scenario="wrong_identity"), "different GitHub identity")
                 self.assertNotIn("remoteControl/enable", [event["method"] for event in self.events("rpc")])
+
+    def test_remote_control_enable_uses_the_verified_daemon_instead_of_a_foreground_server(self):
+        self.configure(remote=1)
+        for arguments in (("remote-control",), ("remote-control", "start"), ("remote-control", "--json"), ("remote-control", "start", "--json"), ("remote-control", "--json", "start")):
+            with self.subTest(arguments=arguments):
+                self.log.unlink(missing_ok=True)
+                result = self.launch(*arguments, operation="codex")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                methods = [event["method"] for event in self.events("rpc")]
+                self.assertLess(methods.index("command/exec"), methods.index("remoteControl/enable"))
+                self.assertEqual(self.events("attached"), [], "management must not execute the native foreground server")
+                if "--json" in arguments:
+                    self.assertEqual(json.loads(result.stdout), {"mode":"daemon", "status":"connected"})
+                else:
+                    self.assertIn("shared bot daemon", result.stdout)
+
+    def test_remote_control_refuses_flags_that_would_escape_to_the_native_foreground_server(self):
+        self.configure(remote=1)
+        for arguments in (("--config", "test=true", "remote-control", "start"), ("remote-control", "-c", "test=true"), ("remote-control", "start", "pair")):
+            with self.subTest(arguments=arguments):
+                self.log.unlink(missing_ok=True)
+                self.assert_refused(self.launch(*arguments, operation="codex"), "remote-control")
+                self.assertEqual(self.events("rpc"), [])
 
     def test_codex_recovery_commands_remain_available_with_a_mismatched_server(self):
         self.configure(remote=1, arguments=("--yolo",))
