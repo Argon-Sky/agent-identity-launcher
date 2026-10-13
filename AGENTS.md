@@ -13,6 +13,8 @@ Agent Identity Launcher runs a coding agent (Claude Code, Codex, OpenCode, …) 
 | `bin/argon-agent` | The whole tool, one bash script. It acts on the name it's invoked as: `argon-agent` (subcommands), `<prefix><agent>` launchers, and `gh` (the shim). Inside a session it is also git's credential helper. |
 | `install.sh` | Links the script into `~/.local/bin`, the `gh` shim into `~/.local/share/argon-agents/shims`, and one launcher per `~/.config/argon-agents/<agent>.env`. |
 | `examples/agent.env` | The config template. |
+| `lib/codex-remote.sh` | Opt-in Codex server handshake and identity check, sourced by the launcher. |
+| `tests/test_launcher.py` | Credential-free launcher regression tests using isolated homes and fake executables. |
 | `docs/` | README images. |
 | `.github/workflows/shellcheck.yml` | CI: shellcheck on both scripts. |
 
@@ -29,7 +31,7 @@ Agent configs live in `~/.config/argon-agents`, outside the repository. Never ad
 
 ## Testing
 
-- Run `shellcheck bin/argon-agent install.sh`.
+- Run `shellcheck bin/argon-agent install.sh lib/codex-remote.sh` and `python3 -m unittest discover -s tests -v`.
 - Test `install.sh` against a throwaway home, passed through `env` so nothing expands against the real one: `env HOME="$tmp" XDG_CONFIG_HOME= ./install.sh`. Never write `export HOME=… X=$HOME/…` on one line: `$HOME` expands before the export and the install hits the real home.
 - `argon-agent check <agent>` tests a real identity end to end. It needs the maintainer's 1Password approval, so ask instead of retrying when it times out.
 - Never print, log or paste installation tokens (`argon-agent token`), JWTs or private keys.

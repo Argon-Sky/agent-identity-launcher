@@ -6,6 +6,7 @@
 #   argon-agent run <agent> [args]   same as above
 #   argon-agent check <agent>        show and test the identity the agent gets, without launching it
 #   argon-agent token <agent>        print a valid installation token
+#   argon-agent codex <agent> [args]  manage that agent's isolated Codex home (login, remote-control pair, ...)
 #
 # Per-agent config lives in ~/.config/argon-agents/<agent>.env (App ID, private key reference, command,
 # optionally the account the app is installed on). Inside an agent session, git asks this script for
@@ -30,7 +31,7 @@ SELF="$(realpath "${BASH_SOURCE[0]}")"
 die() { echo "argon-agent: $*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,18s/^# \{0,1\}//p' "$SELF"
+  sed -n '2,19s/^# \{0,1\}//p' "$SELF"
   exit 1
 }
 
@@ -39,11 +40,37 @@ load_config() {
   [[ -n $AGENT ]] || usage
   local file="$CONFIG_DIR/$AGENT.env"
   [[ -f $file ]] || die "no config for '$AGENT' (expected $file)"
-  ARGON_APP_ID="" ARGON_KEY_REF="" ARGON_OWNER="" ARGON_COMMAND=()
+  ARGON_APP_ID="" ARGON_KEY_REF="" ARGON_OWNER="" ARGON_COMMAND=() ARGON_CODEX_REMOTE=0 ARGON_CODEX_HOME=""
   # shellcheck source=/dev/null
   source "$file"
   [[ -n $ARGON_APP_ID && -n $ARGON_KEY_REF ]] || die "$file must set ARGON_APP_ID and ARGON_KEY_REF"
   (( ${#ARGON_COMMAND[@]} )) || die "$file must set ARGON_COMMAND"
+  [[ $ARGON_CODEX_REMOTE == 0 || $ARGON_CODEX_REMOTE == 1 ]] || die "$file: ARGON_CODEX_REMOTE must be 0 or 1"
+  [[ $ARGON_CODEX_REMOTE == 0 || $(basename "${ARGON_COMMAND[0]}") == codex ]] || die "ARGON_CODEX_REMOTE requires ARGON_COMMAND=(codex ...)"
+}
+
+# A bot server owns its state and environment. Never reuse or silently copy the personal Codex home.
+codex_home() {
+  local personal=${CODEX_HOME:-$HOME/.codex} destination standard
+  [[ $AGENT =~ ^[A-Za-z0-9._-]+$ && $AGENT != . && $AGENT != .. ]] || die "remote mode requires a simple agent config name (letters, digits, '.', '_', '-')"
+  destination=${ARGON_CODEX_HOME:-$HOME/.codex-argon/$AGENT}
+  [[ $destination == /* ]] || die "ARGON_CODEX_HOME must be an absolute path"
+  [[ ! -L $destination ]] || die "the bot Codex home must not be a symlink"
+  (umask 077; mkdir -p "$destination") || die "could not create the bot Codex home"
+  [[ -O $destination && -d $destination ]] || die "the bot Codex home must be a directory owned by you"
+  destination=$(cd "$destination" && pwd -P) || die "could not resolve the bot Codex home"
+  if [[ -d $HOME/.codex ]]; then
+    standard=$(cd "$HOME/.codex" && pwd -P) || die "could not resolve the personal Codex home"
+    [[ $destination != "$standard" ]] || die "ARGON_CODEX_HOME must be separate from the personal Codex home"
+  fi
+  if [[ -d $personal ]]; then
+    personal=$(cd "$personal" && pwd -P) || die "could not resolve the personal Codex home"
+    [[ $destination != "$personal" || ${ARGON_AGENT:-} == "$AGENT" ]] || die "ARGON_CODEX_HOME must be separate from the personal Codex home"
+  fi
+  chmod 700 "$destination" || die "could not protect the bot Codex home"
+  export CODEX_HOME=$destination
+  # A caller's separate database path would defeat isolation even with a private CODEX_HOME.
+  unset CODEX_SQLITE_HOME
 }
 
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
@@ -161,6 +188,27 @@ run() {
   [[ ${ARGON_COMMAND[*]:0:2} == "$SELF _verify" || $(realpath "$target") != "$SELF" ]] ||
     die "${ARGON_COMMAND[0]} resolves to this launcher; pick a launcher prefix that doesn't shadow the agent's command"
 
+  if [[ $ARGON_CODEX_REMOTE == 1 ]]; then
+    local arg
+    for arg in "${ARGON_COMMAND[@]:1}" "$@"; do
+      [[ $arg == -- ]] && break
+      case $arg in
+        --no-daemon|--remote|--remote=*) die "ARGON_CODEX_REMOTE cannot be combined with $arg; remove it from the config or command" ;;
+      esac
+    done
+    [[ -z ${CODEX_EXEC_SERVER_URL:-} ]] || die "ARGON_CODEX_REMOTE cannot be combined with CODEX_EXEC_SERVER_URL"
+    local version
+    version=$("$target" --version) || die "could not read the Codex version"
+    version=${version#codex-cli }
+    if ! [[ $version =~ ^0\.([0-9]+)\.([0-9]+)$ ]]; then
+      die "remote mode requires stable Codex CLI 0.162.1 or newer (found $version)"
+    fi
+    if ! (( BASH_REMATCH[1] > 162 || (BASH_REMATCH[1] == 162 && BASH_REMATCH[2] >= 1) )); then
+      die "remote mode requires stable Codex CLI 0.162.1 or newer (found $version)"
+    fi
+    codex_home
+  fi
+
   load_meta
   local real_gh
   real_gh=$(PATH=${PATH//"$SHIM_DIR:"/} command -v gh) || die "gh not found"
@@ -188,6 +236,31 @@ run() {
   export GH_CONFIG_DIR=$GH_CONFIG_EMPTY
 
   token > /dev/null   # mint now, so any 1Password prompt appears at launch rather than mid-session
+  if [[ $ARGON_CODEX_REMOTE == 1 ]]; then
+    if [[ ${CODEX_MANAGEMENT:-0} == 1 ]]; then
+      exec "$target" "$@"
+    fi
+    local socket
+    # shellcheck source=lib/codex-remote.sh
+    source "$(dirname "$SELF")/../lib/codex-remote.sh"
+    socket=$(codex_remote_socket "$target" "${VERIFY_ONLY:-0}") || exit 1
+    if [[ ${VERIFY_ONLY:-0} == 1 ]]; then
+      exec "$SELF" _verify
+    fi
+    exec "$target" --remote "unix://$socket" "${ARGON_COMMAND[@]:1}" "$@"
+  fi
+  if [[ ${VERIFY_ONLY:-0} == 1 ]]; then
+    exec "$SELF" _verify
+  fi
+  # Newer Codex CLIs otherwise attach to a server with somebody else's environment.
+  # Keep standalone launches under this process's identity, including when a server exists.
+  if [[ $(basename "${ARGON_COMMAND[0]}") == codex ]]; then
+    local help
+    help=$("$target" --help) || die "could not inspect Codex's standalone options"
+    if grep -q -- --no-daemon <<< "$help"; then
+      exec "$target" --no-daemon "${ARGON_COMMAND[@]:1}" "$@"
+    fi
+  fi
   exec "${ARGON_COMMAND[@]}" "$@"
 }
 
@@ -235,7 +308,7 @@ check() {
   load_meta
   echo "agent:          $AGENT → ${ARGON_COMMAND[*]}"
   echo "github app:     $APP_SLUG (app $ARGON_APP_ID, installation $INSTALLATION_ID)"
-  ARGON_COMMAND=("$SELF" _verify)
+  VERIFY_ONLY=1
   run
 }
 
@@ -258,6 +331,7 @@ case $name in
       run)            load_config "${1:-}"; shift; run "$@" ;;
       check)          load_config "${1:-}"; check ;;
       token)          load_config "${1:-}"; token ;;
+      codex)          load_config "${1:-}"; shift; [[ $ARGON_CODEX_REMOTE == 1 ]] || die "codex management requires ARGON_CODEX_REMOTE=1"; CODEX_MANAGEMENT=1; run "$@" ;;
       git-credential) git_credential "$@" ;;
       _verify)        verify ;;
       *)              usage ;;

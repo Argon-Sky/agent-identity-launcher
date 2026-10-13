@@ -13,4 +13,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: shellcheck bin/argon-agent install.sh
+      - run: shellcheck bin/argon-agent install.sh lib/codex-remote.sh
+      - run: python3 -m unittest discover -s tests -v

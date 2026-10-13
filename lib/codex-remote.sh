@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Sourced by argon-agent only for opt-in Codex remote mode. Requires bash 3.2 and jq.
+
+# Reuse Codex's lifecycle lock and JSONL proxy. Never restart an existing server: it may own active work.
+# Check the server over the same connection used to enable remote access, before attaching the TUI.
+codex_remote_socket() (
+  local codex=$1 check_only=${2:-0} lifecycle socket response expected actual probe deadline remaining line
+  lifecycle=$("$codex" app-server daemon start) || die "could not start the Codex server"
+  socket=$(jq -er '.socketPath | select(type == "string" and startswith("/") and (contains("\n") | not))' <<< "$lifecycle") ||
+    die "Codex did not return an absolute server socket path"
+
+  # Bash 3.2 unwinds function locals before an EXIT trap on die. These belong to this subshell only.
+  codex_proxy_pid=""
+  codex_proxy_dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/argon-codex.XXXXXX") || die "could not create the Codex connection directory"
+  # shellcheck disable=SC2329 # Invoked by the EXIT trap, including die's exit path.
+  cleanup_codex_proxy() {
+    if [[ -n $codex_proxy_pid ]]; then
+      kill "$codex_proxy_pid" 2>/dev/null || true
+      wait "$codex_proxy_pid" 2>/dev/null || true
+    fi
+    rm -rf "$codex_proxy_dir"
+  }
+  trap cleanup_codex_proxy EXIT
+  trap 'exit 1' HUP INT TERM
+  mkfifo "$codex_proxy_dir/in" "$codex_proxy_dir/out" || die "could not create the Codex connection pipes"
+  "$codex" app-server proxy --sock "$socket" < "$codex_proxy_dir/in" > "$codex_proxy_dir/out" 2> "$codex_proxy_dir/error" &
+  codex_proxy_pid=$!
+  exec 3> "$codex_proxy_dir/in" 4< "$codex_proxy_dir/out"
+
+  # Bound the entire handshake, including unrelated notifications, rather than each individual read.
+  deadline=$((SECONDS + 20))
+  codex_rpc() {
+    local id=$1 method=$2 params=$3
+    jq -cn --argjson id "$id" --arg method "$method" --argjson params "$params" '{id:$id,method:$method,params:$params}' >&3 ||
+      die "could not send a Codex server request"
+    while :; do
+      remaining=$((deadline - SECONDS))
+      (( remaining > 0 )) || die "Codex server handshake timed out"
+      IFS= read -r -t "$remaining" line <&4 || die "Codex server disconnected or the handshake timed out"
+      jq -e 'type == "object"' > /dev/null 2>&1 <<< "$line" || die "Codex server returned invalid JSON"
+      if jq -e --argjson id "$id" '.id == $id' > /dev/null <<< "$line"; then
+        jq -e 'has("error") | not' > /dev/null <<< "$line" || die "Codex server rejected $method; check its version, settings and ChatGPT login"
+        response=$(jq -ce '.result | select(type == "object")' <<< "$line") || die "Codex server returned an invalid $method response"
+        return
+      fi
+    done
+  }
+
+  codex_rpc 1 initialize '{"clientInfo":{"name":"argon-agent","version":"1"},"capabilities":{"experimentalApi":true}}'
+  printf '%s\n' '{"method":"initialized"}' >&3
+
+  # Only non-secret identity fields leave the server. Token variables are tested for absence, never read out.
+  # Use the same executable for both probes so a different server PATH cannot substitute jq.
+  # shellcheck disable=SC2016 # This script is expanded in the probed shell, not the launcher.
+  probe='"$1" -cn --arg gh "$(command -v gh)" '\''{identity:(env | with_entries(select(.key | test("^(ARGON_AGENT|ARGON_REAL_GH|GIT_AUTHOR_NAME|GIT_AUTHOR_EMAIL|GIT_COMMITTER_NAME|GIT_COMMITTER_EMAIL|GIT_CONFIG_COUNT|GIT_CONFIG_KEY_[0-2]|GIT_CONFIG_VALUE_[0-2]|GH_CONFIG_DIR)$")))),gh:$gh,noTokens:((env | has("GH_TOKEN") or has("GITHUB_TOKEN")) | not)}'\'''
+  expected=$(/bin/sh -c "$probe" argon-probe "$(command -v jq)") || die "could not inspect the launcher identity"
+  codex_rpc 2 command/exec "$(jq -cn --arg probe "$probe" --arg jq "$(command -v jq)" '{command:["/bin/sh","-c",$probe,"argon-probe",$jq],sandboxPolicy:{type:"dangerFullAccess"},timeoutMs:5000,outputBytesCap:16384}')"
+  actual=$(jq -ce 'select(.exitCode == 0) | .stdout | fromjson' <<< "$response") || die "could not inspect the Codex server identity"
+  jq -en --argjson expected "$expected" --argjson actual "$actual" '$expected == $actual and $actual.noTokens' > /dev/null ||
+    die "the bot Codex server has a different GitHub identity or credential environment. Finish its active work, stop it yourself with 'argon-agent codex $AGENT app-server daemon stop', then launch again. No server was stopped or remote access enabled by this launch"
+
+  if [[ $check_only == 0 ]]; then
+    codex_rpc 3 remoteControl/enable '{"ephemeral":true}'
+    # The native CLI also accepts 'connecting': the host may reconnect once network access returns.
+    jq -e '.status == "connected" or .status == "connecting"' > /dev/null <<< "$response" ||
+      die "Codex could not enable remote control; check the server's ChatGPT login and remote-control permissions"
+  fi
+  printf '%s\n' "$socket"
+)
