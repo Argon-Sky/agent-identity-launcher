@@ -219,8 +219,9 @@ run() {
     check_op_token
     OP_SERVICE_ACCOUNT_TOKEN=$(< "$OP_TOKEN_FILE") || die "could not read the 1Password service account token ($OP_TOKEN_FILE)"
     export OP_SERVICE_ACCOUNT_TOKEN
-  else
-    unset OP_SERVICE_ACCOUNT_TOKEN   # e.g. inherited from an opted-in session this launcher was started from
+  elif [[ -n ${OP_SERVICE_ACCOUNT_TOKEN:-} && -f $OP_TOKEN_FILE && $OP_SERVICE_ACCOUNT_TOKEN == "$(< "$OP_TOKEN_FILE")" ]]; then
+    # Inherited from an opted-in session this one was started from. A token of the user's own passes through.
+    unset OP_SERVICE_ACCOUNT_TOKEN
   fi
 
   load_meta
@@ -300,10 +301,9 @@ verify() {
   else
     echo "git auth:       FAILED (on $repo)"; ok=0
   fi
+  # Only shown when there is one, so setups without 1Password see nothing about it.
   if [[ -n ${OP_SERVICE_ACCOUNT_TOKEN:-} ]]; then
     echo "1Password:      service account token in the session (op read skips Touch ID)"
-  else
-    echo "1Password:      no service account token in the session (op read goes through the 1Password app)"
   fi
   if login=$("$ARGON_REAL_GH" api user --jq .login 2>/dev/null); then
     echo "gh fallback:    FAILED (gh without the shim still acts as $login)"; ok=0

@@ -114,8 +114,9 @@ class LauncherTests(unittest.TestCase):
         self.write_tool("other-agent", FAKE_CODEX)
         self.write_tool("gh", "import sys\nsys.exit(0)\n")
         # Unexpected credential/network access fails immediately instead of contacting GitHub.
-        for tool in ("curl", "op"):
-            self.write_tool(tool, "import sys\nsys.exit(97)\n")
+        self.write_tool("curl", "import sys\nsys.exit(97)\n")
+        # 1Password is optional: any call is logged so tests can prove setups without it never reach op.
+        self.write_tool("op", "import json, os, sys\nopen(os.environ['FAKE_LOG'], 'a').write(json.dumps(dict(event='op', args=sys.argv[1:])) + '\\n')\nsys.exit(97)\n")
         (self.shims / "gh").symlink_to(REPO / "bin/argon-agent")
         self.configure()
 
@@ -410,9 +411,13 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIsNone(self.events("attached")[0]["op_token"])
         self.log.unlink()
-        result = self.launch(extra_env={"OP_SERVICE_ACCOUNT_TOKEN":"ops_synthetic_inherited_token"})
+        result = self.launch(extra_env={"OP_SERVICE_ACCOUNT_TOKEN":OP_TOKEN})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIsNone(self.events("attached")[0]["op_token"], "an inherited token must not reach a session that did not opt in")
+        self.assertIsNone(self.events("attached")[0]["op_token"], "the launcher's token must not reach a session that did not opt in")
+        self.log.unlink()
+        result = self.launch(extra_env={"OP_SERVICE_ACCOUNT_TOKEN":"ops_synthetic_users_own_token"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.events("attached")[0]["op_token"], "ops_synthetic_users_own_token", "a token the user set outside the launcher passes through")
         self.log.unlink()
         self.opt_in_session_token()
         result = self.launch()
@@ -473,11 +478,27 @@ class LauncherTests(unittest.TestCase):
             config.write("ARGON_OP_SESSION_TOKEN=yes\n")
         self.assert_refused(self.launch(), "ARGON_OP_SESSION_TOKEN must be 0 or 1")
 
+    def test_setups_without_1password_never_call_op_or_mention_it(self):
+        for remote in (0, 1):
+            with self.subTest(remote=remote):
+                self.log.unlink(missing_ok=True)
+                self.configure(remote=remote)
+                result = self.launch()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIsNone(self.events("attached")[0]["op_token"])
+                self.assertEqual(self.events("op"), [])
+                self.assertNotIn("1Password", result.stdout + result.stderr)
+        environment = dict(self.env, ARGON_AGENT="test", ARGON_REAL_GH=str(self.tools / "gh"))
+        result = subprocess.run([BASH, str(REPO / "bin/argon-agent"), "_verify"], env=environment, cwd=self.home, capture_output=True, text=True, timeout=60)
+        self.assertIn("git author:", result.stdout)
+        self.assertNotIn("1Password", result.stdout + result.stderr)
+
     def test_install_is_repeatable_in_throwaway_home(self):
         original_config = (self.config / "test.env").read_bytes()
         for _ in range(2):
             result = subprocess.run([BASH, str(REPO / "install.sh"), "--prefix", "test-"], env=self.env, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("1Password", result.stdout + result.stderr, "a key-file setup must not be told about 1Password")
         self.assertEqual((self.config / "test.env").read_bytes(), original_config)
         launcher = self.home / ".local/bin/test-test"
         self.assertEqual(launcher.resolve(), (REPO / "bin/argon-agent").resolve())
