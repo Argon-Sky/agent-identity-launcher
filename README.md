@@ -38,7 +38,7 @@ This repository's own history, written by Claude Code through the launcher:
   <img src="docs/commits.png" alt="GitHub commit list where every commit is authored by argon-claude[bot]" width="600">
 </div>
 
-No daemon, no server, no changes to your `~/.gitconfig`, SSH keys, or `gh` login: one bash script and one small config file per agent. Plain `claude` keeps working as you.
+The launcher leaves your `~/.gitconfig`, SSH keys, and `gh` login alone. Standalone agents need no server; Codex can optionally use its own background server for remote control. Plain `claude` keeps working as you.
 
 ## How it works
 
@@ -60,6 +60,48 @@ Git is configured through `GIT_CONFIG_*` environment variables only: inherited c
 `gh` is also pointed at an empty config directory (`GH_CONFIG_DIR`), so a `gh` that bypasses the shim finds no login and fails instead of acting as you. That happens when a shell startup file puts another `gh` ahead of the shim on `PATH`, for example `brew shellenv` in `~/.zprofile` in the login shells Codex runs its commands in; `argon-agent check` reports it.
 
 **Not a sandbox.** The agent still runs as your user and could deliberately use your SSH key. This prevents an agent from *accidentally* acting as you; it doesn't stop a malicious one.
+
+### Codex remote control
+
+Codex CLI 0.162.1 or later can share a background server between the terminal and ChatGPT remote control. That server keeps the environment it started with, so attaching a launcher to a personal server would lose the launcher's GitHub identity. Standalone Codex launches use `--no-daemon` when the installed CLI supports it. Remote mode additionally requires [websocat 1.x](https://github.com/vi/websocat) (`brew install websocat` on macOS), which handles Codex's WebSocket transport over a local Unix socket.
+
+To use remote control, opt in in your Codex agent config:
+
+```bash
+ARGON_COMMAND=(codex)        # add your usual model or approval flags here
+ARGON_CODEX_REMOTE=1
+```
+
+Remove `--no-daemon` from that config. The launcher uses a separate Codex home at `~/.codex-argon/<agent>`, for example `~/.codex-argon/codex` for `codex.env`. An optional `ARGON_CODEX_HOME` selects another absolute path. The bot home has its own login, settings, sessions, skills, plugins, and device pairing. Personal Codex state is not copied or shared. Configure the bot home with the settings and capabilities you want, and do not symlink its database or authentication files to a personal home. See OpenAI's [Codex state locations](https://learn.chatgpt.com/docs/config-file/environment-variables).
+
+For a config named `codex.env`, set up the bot server once:
+
+```bash
+argon-agent codex codex login                     # sign in to the ChatGPT account used on your phone
+argon-agent check codex                           # check the server identity and GitHub access
+argon-agent codex codex remote-control             # enable remote access on the running bot server
+argon-agent codex codex remote-control pair        # pair this bot server with ChatGPT
+argon-codex                                       # start a remotely accessible session
+```
+
+Pair each phone or desktop client with the bot server separately. In desktop ChatGPT, open Settings > Connections > Control other devices and select **Authorize on chatgpt.com** if prompted. Finish authorization with the same ChatGPT account, then enter the manual pairing code in **Add a device**. Generate a fresh code for each client with `argon-agent codex codex remote-control pair`.
+
+Select the connected bot computer in the desktop app to see its threads. This also works when the app and bot server run on the same Mac: the bot's threads belong to that connection, while the app's ordinary local history uses the personal Codex home. Existing standalone sessions are not moved by installing or enabling remote mode.
+
+In `argon-agent codex <agent> ...`, `<agent>` is the config file name without `.env`. Management commands use that bot's environment and home, without adding your configured session flags. `remote-control` and `remote-control start` enable remote access on the verified daemon and return; they do not run the native foreground server, which would compete with the daemon for remote connections and thread ownership. The remote-control wrapper accepts `start`, `pair`, `stop`, and `--json`; put `remote-control` first and configure other server settings in the bot home's `config.toml`. Management commands check the running server's identity before proceeding, including remote enable and pairing. Login, logout, help, version inspection, stop, and disabling remote access remain available without that check so a mismatched server can be recovered. Other management commands start the bot server if needed to perform the check. It can also inspect or stop that server:
+
+```bash
+argon-agent codex codex app-server daemon version
+argon-agent codex codex app-server daemon stop
+```
+
+The launcher uses Codex's lifecycle commands and locking to start or reuse the bot server, checks its actual credential environment, and enables remote access on that same connection. It then attaches the terminal to the returned Unix socket explicitly, so a connection failure cannot silently start a different session. New threads use the invoking shell's working directory unless you supply `--cd`/`-C` in the config or command. Closing the terminal leaves the server available; keep the computer awake and connected. Resume through the same launcher, for example `argon-codex resume --last`. Existing personal sessions stay in the personal home and must be finished there; they are not automatically migrated.
+
+Remote resume keeps the thread's saved permissions. The launcher omits configured permission defaults (`--yolo`, `--dangerously-bypass-approvals-and-sandbox`, `--approve-for-me`, `--ask-for-approval`/`-a`, and `--sandbox`/`-s`) when resuming, while preserving other configured flags and all caller arguments. Explicit permission overrides passed to a remote resume are unsupported by Codex; start a new thread to use different permissions.
+
+An existing server with a different identity is refused. Finish its work, stop it with the management command above, and launch again. The launcher never automatically stops or restarts a server. After changing the GitHub App, launcher location, or credential setup, use that same procedure to refresh the server's environment. Remote control is enabled for the current server process; after a stop or reboot, launch through the launcher again. Do not start the bot server through plain `codex`, which would omit its identity environment.
+
+This integration uses experimental Codex server APIs and is tested against CLI 0.162.1. Unsupported versions, rejected requests, and identity mismatches fail visibly. Remote access requires ChatGPT authentication and account or workspace permission; `connecting` means Codex is still establishing the connection. Phone sign-in and pairing follow OpenAI's [remote connections documentation](https://learn.chatgpt.com/docs/remote-connections).
 
 ## Setup
 
@@ -141,6 +183,7 @@ op://<vault-id>/<item-id>/private key
 <prefix><agent> [args...]     # e.g. argon-claude: run the agent under its identity; arguments are passed through
 argon-agent check <agent>     # test the identity without starting the agent
 argon-agent token <agent>     # print a valid installation token
+argon-agent codex <agent> ... # manage an opt-in Codex bot's isolated home
 ```
 
 To add or rename an agent, add or rename its config, then re-run `./install.sh` (or change the prefix with `./install.sh --prefix …`); old launchers are removed. To change the committer name, rename the GitHub App (then `rm -rf ~/.cache/argon-agents`). To rotate a key, generate a new one on the app's page, replace it, run `check`, then delete the old one.
@@ -150,6 +193,8 @@ To add or rename an agent, add or rename its config, then re-run `./install.sh` 
 | Symptom | Fix |
 |---|---|
 | Commits show your personal name | The agent was started as `claude`, not through its launcher (`argon-claude`). |
+| Remote Codex reports a different server identity | Finish the bot server's active work, run `argon-agent codex <agent> app-server daemon stop`, then launch through the launcher again. |
+| ChatGPT cannot open a standalone Codex task | Opt in to Codex remote mode above. A `--no-daemon` session owns its task independently and cannot share it with the remote server. |
 | `could not read the private key from 1Password` | Only if a config uses an `op://` key. Run `op account list`; if empty, connect the CLI to the desktop app. Re-copy the secret reference, or point `ARGON_KEY_REF` at a key file instead. |
 | `op.token must be chmod 600` | `chmod 600 ~/.config/argon-agents/op.token`, or delete it to go back to Touch ID. |
 | `op.token is empty` / `is not a regular file` | Delete `op.token` to go back to 1Password app authentication, or write the token to it again. |
@@ -160,3 +205,7 @@ To add or rename an agent, add or rename its config, then re-run `./install.sh` 
 | `gh in zsh -l: WARNING`, or `gh` asks for `gh auth login` in Codex | A login-shell startup file (`~/.zprofile`, often `brew shellenv`) puts another `gh` before the shim, and Codex runs its commands in login shells. Add this at the end of `~/.zprofile` (or `~/.bash_profile`) to put the shim back in front inside agent sessions only: `[[ -n $ARGON_AGENT ]] && PATH="$HOME/.local/share/argon-agents/shims:$PATH"`. |
 | Pull requests or comments show your personal name | They were made by a launcher older than the empty `GH_CONFIG_DIR`, through a `gh` that bypassed the shim; update, then run `argon-agent check <agent>`. |
 | Anything stale | `rm -rf ~/.cache/argon-agents "$TMPDIR/argon-agents-$(id -u)"` |
+
+## Development checks
+
+Run `shellcheck bin/argon-agent install.sh lib/codex-remote.sh` and `python3 -m unittest discover -s tests -v`. The offline regression suite uses temporary homes, fake GitHub metadata and tokens, and fake executables; it needs Python 3 for tests only and never contacts GitHub or reads real credentials. On macOS, `/bin/bash` exercises the supported Bash 3.2 runtime. With Codex and websocat installed, run `ARGON_TEST_CODEX="$(command -v codex)" python3 -m unittest discover -s tests -p test_codex_live.py -v` for isolated real-server and terminal checks without account credentials or paid model calls. A loopback fake model keeps a synthetic turn active to verify simultaneous terminal resume and saved permissions. Phone verification is separate: launch with a bot home, verify its identity with `check`, and connect ChatGPT to that bot server before treating remote access as proven.
