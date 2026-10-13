@@ -127,10 +127,10 @@ class LauncherTests(unittest.TestCase):
         token_directory.mkdir(mode=0o700, exist_ok=True)
         (token_directory / "test.token").write_text(str(int(time.time()) + 3600) + " ghs_synthetic_offline_test\n")
 
-    def launch(self, *arguments, scenario="", version="0.162.1", extra_env=None, operation="run"):
+    def launch(self, *arguments, scenario="", version="0.162.1", extra_env=None, operation="run", cwd=REPO):
         environment = dict(self.env, FAKE_SCENARIO=scenario, FAKE_VERSION=version)
         environment.update(extra_env or {})
-        completed = subprocess.run([BASH, str(REPO / "bin/argon-agent"), operation, "test", *arguments], env=environment, capture_output=True, text=True, timeout=30)
+        completed = subprocess.run([BASH, str(REPO / "bin/argon-agent"), operation, "test", *arguments], env=environment, cwd=cwd, capture_output=True, text=True, timeout=30)
         self.assertNotIn("ghs_synthetic_offline_test", completed.stdout + completed.stderr)
         self.assertFalse(list(self.tmp.glob("argon-codex.*")), "connection pipes must be cleaned after success or failure")
         return completed
@@ -182,7 +182,23 @@ class LauncherTests(unittest.TestCase):
                 self.log.unlink(missing_ok=True)
                 result = self.launch(*arguments)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(self.events("attached")[0]["args"][2:], ["--yolo", "--model", "resume", *arguments])
+                self.assertEqual(self.events("attached")[0]["args"][2:], ["--cd", str(REPO), "--yolo", "--model", "resume", *arguments])
+
+    def test_remote_new_threads_use_the_invoking_directory(self):
+        self.configure(remote=1)
+        result = self.launch("new prompt", cwd=self.home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.events("attached")[0]["args"][2:], ["--cd", str(self.home), "new prompt"])
+
+    def test_remote_new_threads_preserve_explicit_directory_arguments(self):
+        for flags in (("--cd", str(self.home)), ("-C", str(self.home)), ("--cd=" + str(self.home),), ("-C" + str(self.home),)):
+            for configured in (False, True):
+                with self.subTest(flags=flags, configured=configured):
+                    self.log.unlink(missing_ok=True)
+                    self.configure(remote=1, arguments=flags if configured else ())
+                    result = self.launch(*(flags if not configured else ()), "new prompt")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(self.events("attached")[0]["args"][2:], [*flags, "new prompt"])
 
     def test_remote_resume_in_config_omits_permissions_and_preserves_option_values(self):
         self.configure(remote=1, arguments=("--yolo", "-c", "--yolo", "resume", "--last"))

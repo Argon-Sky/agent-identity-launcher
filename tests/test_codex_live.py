@@ -183,19 +183,23 @@ class LiveCodexTests(unittest.TestCase):
         return subprocess.run([CODEX, *arguments], env=self.env, capture_output=True, text=True, timeout=25)
 
     def stop_daemon(self):
-        result = self.command("app-server", "daemon", "stop")
-        self.assertEqual(result.returncode, 0, "could not stop the isolated test daemon")
-        # Codex 0.162.1 leaves its package updater running after daemon stop, even if the home is removed.
-        # Discover only this test home's updater, then stop that specific PID before removing the home.
-        prefix = str(self.codex_home / "packages/app-server-daemon/releases") + "/"
-        processes = subprocess.check_output(["ps", "-axo", "pid=,command="], text=True)
-        for line in processes.splitlines():
-            pid, command = line.strip().split(None, 1)
-            if command.startswith(prefix) and command.endswith(" app-server daemon pid-update-loop"):
-                try:
-                    os.kill(int(pid), signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+        failed = True
+        try:
+            result = self.command("app-server", "daemon", "stop")
+            self.assertEqual(result.returncode, 0, "could not stop the isolated test daemon")
+            failed = False
+        finally:
+            # Codex 0.162.1 leaves its package updater running after daemon stop, even if the home is removed.
+            # A failed stop must also release this test's daemon. Match only binaries installed in our home.
+            prefix = str(self.codex_home / "packages/app-server-daemon/releases") + "/"
+            processes = subprocess.check_output(["ps", "-axo", "pid=,command="], text=True)
+            for line in processes.splitlines():
+                pid, command = line.strip().split(None, 1)
+                if command.startswith(prefix) and (failed or command.endswith(" app-server daemon pid-update-loop")):
+                    try:
+                        os.kill(int(pid), signal.SIGKILL if failed else signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
 
     def verify_server(self, environment):
         script = 'set -euo pipefail\nAGENT=$ARGON_AGENT\ndie() { printf "argon-agent: %s\\n" "$*" >&2; exit 1; }\nsource "$1"\ncodex_remote_socket "$2" 1\n'
@@ -285,6 +289,23 @@ class LiveCodexTests(unittest.TestCase):
             terminals.append(terminal)
         for terminal in terminals:
             self.assertIsNone(terminal.process.poll(), "both terminals must remain attached")
+        # The daemon was started elsewhere. A new terminal thread must use the invoking directory.
+        invoking = self.home / "invoking project"
+        invoking.mkdir()
+        # This directory is empty and belongs to this fixture; approve only it for the terminal test.
+        with (self.codex_home / "config.toml").open("a") as config:
+            config.write('\n[projects.' + json.dumps(str(invoking)) + ']\ntrust_level="trusted"\n')
+        new_prompt = "Synthetic caller directory test."
+        new_script = 'set -euo pipefail\nsource "$1"\nARGON_COMMAND=("$2" --no-alt-screen --yolo)\ncodex_remote_run "$2" "$3" "$4"\n'
+        new_terminal = Terminal(["/bin/bash", "-c", new_script, "argon-live-test", str(REPO / "lib/codex-remote.sh"), CODEX, self.socket, new_prompt], self.env, invoking)
+        self.addCleanup(new_terminal.close)
+        new_terminal.wait_for(new_prompt)
+        loaded = observer.request("thread/loaded/list", {})
+        new_threads = [identifier for identifier in loaded["data"] if identifier != thread_id]
+        self.assertEqual(len(new_threads), 1)
+        created = observer.request("thread/read", {"threadId":new_threads[0], "includeTurns":True})
+        self.assertEqual(created["thread"]["cwd"], str(invoking))
+        observer.request("turn/interrupt", {"threadId":new_threads[0], "turnId":created["thread"]["turns"][-1]["id"]})
         resumed = observer.request("thread/resume", {"threadId":thread_id})
         self.assertEqual(resumed["thread"]["id"], thread_id)
         self.assertEqual(resumed["thread"]["turns"][-1]["status"], "inProgress")

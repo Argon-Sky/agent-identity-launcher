@@ -18,7 +18,7 @@ codex_resume_requested() {
 
 # A resumed remote thread owns its permissions. Codex rejects CLI permission overrides even when they repeat those permissions, so omit only the configured defaults, never caller arguments.
 codex_remote_run() {
-  local codex=$1 socket=$2 index=1 arg
+  local codex=$1 socket=$2 index=1 arg has_cwd=0
   shift 2
   local args=("$codex" --remote "unix://$socket")
   if codex_resume_requested "${ARGON_COMMAND[@]:1}" "$@"; then
@@ -46,6 +46,14 @@ codex_remote_run() {
       args+=("$arg")
     done
   else
+    # A local launcher shares the daemon, not its startup directory. Respect explicit cwd flags.
+    for arg in "${ARGON_COMMAND[@]:1}" "$@"; do
+      [[ $arg == -- ]] && break
+      case $arg in
+        -C|--cd|--cd=*|-C?*) has_cwd=1 ;;
+      esac
+    done
+    (( has_cwd )) || args+=(--cd "$PWD")
     args+=("${ARGON_COMMAND[@]:1}")
   fi
   exec "${args[@]}" "$@"
