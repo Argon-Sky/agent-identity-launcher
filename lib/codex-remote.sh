@@ -12,7 +12,7 @@ codex_remote_socket() (
   # Bash 3.2 unwinds function locals before an EXIT trap on die. These belong to this subshell only.
   codex_proxy_pid=""
   codex_proxy_dir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/argon-codex.XXXXXX") || die "could not create the Codex connection directory"
-  # shellcheck disable=SC2329 # Invoked by the EXIT trap, including die's exit path.
+  # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap, including die's exit path (older ShellCheck uses SC2317).
   cleanup_codex_proxy() {
     if [[ -n $codex_proxy_pid ]]; then
       kill "$codex_proxy_pid" 2>/dev/null || true
