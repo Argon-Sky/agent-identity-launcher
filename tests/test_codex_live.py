@@ -216,6 +216,24 @@ class LiveCodexTests(unittest.TestCase):
         self.assertFalse(list(self.home.glob("argon-codex.*")))
         self.assertFalse((self.codex_home / "auth.json").exists())
 
+    def test_actual_server_must_hold_the_launch_service_account_token(self):
+        token = dict(self.env, OP_SERVICE_ACCOUNT_TOKEN="ops_synthetic_live_token")
+        result = self.verify_server(token)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("do not get the 1Password service account token", result.stderr)
+        for policy in ("", "[shell_environment_policy]\nignore_default_excludes = false\n"):
+            with self.subTest(policy=policy):
+                self.stop_daemon()
+                (self.codex_home / "config.toml").write_text(policy)
+                result = subprocess.run([CODEX, "app-server", "daemon", "start"], env=token, capture_output=True, text=True, timeout=25)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for environment, accepted in ((token, not policy), (dict(token, OP_SERVICE_ACCOUNT_TOKEN="ops_synthetic_replaced_token"), False), (self.env, bool(policy))):
+                    result = self.verify_server(environment)
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    if not accepted:
+                        self.assertIn("do not get the 1Password service account token", result.stderr)
+                    self.assertNotIn("ops_synthetic", result.stdout + result.stderr)
+
     def test_two_proxy_clients_share_a_loaded_thread_without_model_turn(self):
         first = Proxy(self.websocat, self.socket, self.env)
         self.addCleanup(first.close)
