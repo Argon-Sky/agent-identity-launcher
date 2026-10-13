@@ -84,6 +84,10 @@ argon-agent codex codex remote-control pair        # pair this bot server with C
 argon-codex                                       # start a remotely accessible session
 ```
 
+Pair each phone or desktop client with the bot server separately. In desktop ChatGPT, open Settings > Connections > Control other devices and select **Authorize on chatgpt.com** if prompted. Finish authorization with the same ChatGPT account, then enter the manual pairing code in **Add a device**. Generate a fresh code for each client with `argon-agent codex codex remote-control pair`.
+
+Select the connected bot computer in the desktop app to see its threads. This also works when the app and bot server run on the same Mac: the bot's threads belong to that connection, while the app's ordinary local history uses the personal Codex home. Existing standalone sessions are not moved by installing or enabling remote mode.
+
 In `argon-agent codex <agent> ...`, `<agent>` is the config file name without `.env`. Management commands use that bot's environment and home, without adding your configured session flags. `remote-control` and `remote-control start` enable remote access on the verified daemon and return; they do not run the native foreground server, which would compete with the daemon for remote connections and thread ownership. The remote-control wrapper accepts `start`, `pair`, `stop`, and `--json`; put `remote-control` first and configure other server settings in the bot home's `config.toml`. Management commands check the running server's identity before proceeding, including remote enable and pairing. Login, logout, help, version inspection, stop, and disabling remote access remain available without that check so a mismatched server can be recovered. Other management commands start the bot server if needed to perform the check. It can also inspect or stop that server:
 
 ```bash
