@@ -493,6 +493,19 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("git author:", result.stdout)
         self.assertNotIn("1Password", result.stdout + result.stderr)
 
+    def test_install_warns_about_1password_only_when_it_cannot_work(self):
+        (self.config / "onepassword.env").write_text('ARGON_APP_ID="test-app"\nARGON_KEY_REF="op://vault/item/private key"\nARGON_COMMAND=(codex)\n')
+        cases = (("[{}]", False, False), ("[]", False, True), ("[]", True, False))
+        for accounts, token, warns in cases:
+            with self.subTest(accounts=accounts, token=token):
+                self.write_tool("op", "import sys\nprint(" + repr(accounts) + ") if sys.argv[1:3] == ['account', 'list'] else sys.exit(97)\n")
+                (self.config / "op.token").unlink(missing_ok=True)
+                if token:
+                    self.opt_in_session_token()
+                result = subprocess.run([BASH, str(REPO / "install.sh")], env=self.env, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual("no usable account" in result.stdout, warns, result.stdout)
+
     def test_install_is_repeatable_in_throwaway_home(self):
         original_config = (self.config / "test.env").read_bytes()
         for _ in range(2):

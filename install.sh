@@ -100,11 +100,15 @@ case ":$PATH:" in
 esac
 # Only warn about 1Password when a config actually reads a key from it, so a user who keeps keys in
 # files is not told to configure a tool they don't use. `op whoami` fails until a command is authorized
-# in the session, so check for a connected account instead.
-if (( uses_op )) && { ! command -v op > /dev/null || [[ $(op account list --format=json 2> /dev/null | jq length 2> /dev/null) -gt 0 ]] 2> /dev/null; }; then
-  echo "  warning: a config reads its key from 1Password, but the CLI has no usable account;"
-  echo "           enable 1Password → Settings → Developer → Integrate with 1Password CLI, or add an"
-  echo "           op.token beside the configs (see README, \"Fewer Touch ID prompts\")"
+# in the session, so check for a connected account instead. A service account token needs no account.
+if (( uses_op )); then
+  if ! command -v op > /dev/null; then
+    echo "  warning: a config reads its key from 1Password, but the 1Password CLI (op) is not installed"
+  elif [[ ! -e $CONFIG/op.token ]] && ! [[ $(op account list --format=json 2> /dev/null | jq length 2> /dev/null) -gt 0 ]] 2> /dev/null; then
+    echo "  warning: a config reads its key from 1Password, but the CLI has no usable account;"
+    echo "           enable 1Password → Settings → Developer → Integrate with 1Password CLI, or add an"
+    echo "           op.token beside the configs (see README, \"Fewer Touch ID prompts\")"
+  fi
 fi
 
 echo
