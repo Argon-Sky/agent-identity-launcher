@@ -86,10 +86,10 @@ b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 check_op_token() {
   [[ -e $OP_TOKEN_FILE ]] || return 0
   [[ -f $OP_TOKEN_FILE ]] || die "$OP_TOKEN_FILE is not a regular file; remove it to go back to 1Password app authentication"
-  [[ -s $OP_TOKEN_FILE ]] || die "$OP_TOKEN_FILE is empty; save the service account token there, or remove it to go back to 1Password app authentication"
   local perms
   perms=$(ls -ldL "$OP_TOKEN_FILE") || die "could not read the 1Password service account token ($OP_TOKEN_FILE)"
   [[ ${perms:0:10} == -rw------- ]] || die "$OP_TOKEN_FILE must be chmod 600 (is ${perms:1:9}); refusing to use a service account token other users can read"
+  [[ -n $(< "$OP_TOKEN_FILE") ]] || die "$OP_TOKEN_FILE is empty; save the service account token there, or remove it to go back to 1Password app authentication"
 }
 
 # Reads a secret reference. When a service account token is present, it is passed to this one `op read`
@@ -212,13 +212,15 @@ run() {
     codex_home
   fi
 
-  # Opt-in: the session gets the service account token, so the agent's own `op read` skips Touch ID. It is
+  # Only an opted-in session gets the service account token, so the agent's own `op read` skips Touch ID. It is
   # exported before the Codex server starts, because that server keeps the environment it started with.
   if [[ $ARGON_OP_SESSION_TOKEN == 1 ]]; then
     [[ -e $OP_TOKEN_FILE ]] || die "ARGON_OP_SESSION_TOKEN=1 needs a 1Password service account token in $OP_TOKEN_FILE; see README, \"Fewer Touch ID prompts\""
     check_op_token
     OP_SERVICE_ACCOUNT_TOKEN=$(< "$OP_TOKEN_FILE") || die "could not read the 1Password service account token ($OP_TOKEN_FILE)"
     export OP_SERVICE_ACCOUNT_TOKEN
+  else
+    unset OP_SERVICE_ACCOUNT_TOKEN   # e.g. inherited from an opted-in session this launcher was started from
   fi
 
   load_meta

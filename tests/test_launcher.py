@@ -410,6 +410,10 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIsNone(self.events("attached")[0]["op_token"])
         self.log.unlink()
+        result = self.launch(extra_env={"OP_SERVICE_ACCOUNT_TOKEN":"ops_synthetic_inherited_token"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(self.events("attached")[0]["op_token"], "an inherited token must not reach a session that did not opt in")
+        self.log.unlink()
         self.opt_in_session_token()
         result = self.launch()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -429,11 +433,22 @@ class LauncherTests(unittest.TestCase):
         for scenario in ("missing_op_token", "replaced_op_token"):
             with self.subTest(scenario=scenario):
                 self.log.unlink(missing_ok=True)
-                self.assert_refused(self.launch(scenario=scenario), "different GitHub identity or credential environment")
+                self.assert_refused(self.launch(scenario=scenario), "do not get the 1Password service account token")
                 self.assertNotIn("remoteControl/enable", [event["method"] for event in self.events("rpc")])
 
+    def test_remote_refuses_a_server_with_a_token_the_launch_does_not_have(self):
+        self.configure(remote=1)
+        self.assert_refused(self.launch(scenario="replaced_op_token"), "do not get the 1Password service account token")
+
+    def test_remote_fails_closed_when_the_token_fingerprint_cannot_be_computed(self):
+        self.configure(remote=1)
+        self.opt_in_session_token()
+        self.write_tool("openssl", "import sys\nsys.exit(1)\n")
+        self.assert_refused(self.launch(), "could not inspect the launcher identity")
+        self.assertNotIn("remoteControl/enable", [event["method"] for event in self.events("rpc")])
+
     def test_session_token_opt_in_refuses_an_unusable_token_file(self):
-        cases = (("missing", "needs a 1Password service account token"), ("empty", "is empty"), ("readable", "must be chmod 600"), ("directory", "is not a regular file"))
+        cases = (("missing", "needs a 1Password service account token"), ("empty", "is empty"), ("blank", "is empty"), ("readable", "must be chmod 600"), ("directory", "is not a regular file"))
         for case, message in cases:
             with self.subTest(case=case):
                 self.log.unlink(missing_ok=True)
@@ -447,7 +462,7 @@ class LauncherTests(unittest.TestCase):
                         config.write("ARGON_OP_SESSION_TOKEN=1\n")
                     token.mkdir()
                 else:
-                    self.opt_in_session_token(mode=0o644 if case == "readable" else 0o600, content="" if case == "empty" else OP_TOKEN + "\n")
+                    self.opt_in_session_token(mode=0o644 if case == "readable" else 0o600, content={"empty":"", "blank":"\n"}.get(case, OP_TOKEN + "\n"))
                     if case == "missing":
                         token.unlink()
                 self.assert_refused(self.launch(), message)
