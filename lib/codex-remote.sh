@@ -1,6 +1,56 @@
 #!/usr/bin/env bash
 # Sourced by argon-agent only for opt-in Codex remote mode. Requires bash 3.2, jq and websocat 1.x.
 
+# Find the subcommand without confusing an option value or a prompt with "resume".
+codex_resume_requested() {
+  while (( $# )); do
+    case $1 in
+      --) return 1 ;;
+      -c|--config|-m|--model|-p|--profile|-s|--sandbox|-a|--ask-for-approval|-C|--cd|--add-dir|--enable|--disable|-i|--image|--local-provider|--remote-auth-token-env)
+        (( $# >= 2 )) || return 1
+        shift 2 ;;
+      -*) shift ;;
+      *) [[ $1 == resume ]]; return ;;
+    esac
+  done
+  return 1
+}
+
+# A resumed remote thread owns its permissions. Codex rejects CLI permission overrides even when they repeat those permissions, so omit only the configured defaults, never caller arguments.
+codex_remote_run() {
+  local codex=$1 socket=$2 index=1 arg
+  shift 2
+  local args=("$codex" --remote "unix://$socket")
+  if codex_resume_requested "${ARGON_COMMAND[@]:1}" "$@"; then
+    while (( index < ${#ARGON_COMMAND[@]} )); do
+      arg=${ARGON_COMMAND[$index]}
+      index=$((index + 1))
+      case $arg in
+        --yolo|--dangerously-bypass-approvals-and-sandbox|--approve-for-me|--ask-for-approval=*|--sandbox=*|-a?*|-s?*) continue ;;
+        -a|--ask-for-approval|-s|--sandbox) index=$((index + 1)); continue ;;
+        --)
+          args+=("$arg")
+          while (( index < ${#ARGON_COMMAND[@]} )); do
+            args+=("${ARGON_COMMAND[$index]}")
+            index=$((index + 1))
+          done
+          break ;;
+        -c|--config|-m|--model|-p|--profile|-C|--cd|--add-dir|--enable|--disable|-i|--image|--local-provider|--remote-auth-token-env)
+          args+=("$arg")
+          if (( index < ${#ARGON_COMMAND[@]} )); then
+            args+=("${ARGON_COMMAND[$index]}")
+            index=$((index + 1))
+          fi
+          continue ;;
+      esac
+      args+=("$arg")
+    done
+  else
+    args+=("${ARGON_COMMAND[@]:1}")
+  fi
+  exec "${args[@]}" "$@"
+}
+
 # Reuse Codex's lifecycle lock and websocat's WebSocket-over-Unix transport. Never restart an existing server.
 # Check the server over the same connection used to enable remote access, before attaching the TUI.
 codex_remote_socket() (

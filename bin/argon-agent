@@ -254,7 +254,7 @@ run() {
     if [[ ${VERIFY_ONLY:-0} == 1 ]]; then
       exec "$SELF" _verify
     fi
-    exec "$target" --remote "unix://$socket" "${ARGON_COMMAND[@]:1}" "$@"
+    codex_remote_run "$target" "$socket" "$@"
   fi
   if [[ ${VERIFY_ONLY:-0} == 1 ]]; then
     exec "$SELF" _verify

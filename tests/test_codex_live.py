@@ -1,4 +1,4 @@
-"""Optional real-server proof without account credentials or a model turn.
+"""Optional real-server and terminal proof without account credentials or paid model calls.
 
 ARGON_TEST_CODEX="$(command -v codex)" python3 -m unittest discover -s tests -p test_codex_live.py -v
 
@@ -6,21 +6,102 @@ Requires websocat. Uses a new short /tmp home and stops only that home's daemon.
 skip this file; installing Codex is not required for the offline suite or CI.
 """
 
+import fcntl
+import http.server
 import json
 import os
 from pathlib import Path
+import pty
+import select
 import selectors
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import tempfile
+import termios
+import threading
 import time
 import unittest
 
 
 REPO = Path(__file__).resolve().parents[1]
 CODEX = os.environ.get("ARGON_TEST_CODEX")
+
+
+class Terminal:
+    def __init__(self, command, environment, cwd):
+        self.master, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 35, 120, 0, 0))
+        try:
+            self.process = subprocess.Popen(command, env=dict(environment, TERM="xterm-256color"), cwd=cwd, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+        except BaseException:
+            os.close(self.master)
+            raise
+        finally:
+            os.close(slave)
+        self.output = b""
+
+    def wait_for(self, text):
+        deadline = time.monotonic() + 15
+        while text.encode() not in self.output:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([self.master], [], [], remaining)[0]:
+                raise AssertionError("terminal timed out: " + repr(self.output[-2000:]))
+            try:
+                data = os.read(self.master, 65536)
+            except OSError as error:
+                raise AssertionError("terminal exited before expected text: " + repr(self.output[-2000:])) from error
+            if not data:
+                raise AssertionError("terminal disconnected before expected text: " + repr(self.output[-2000:]))
+            self.output += data
+            if b"\x1b[6n" in data:
+                os.write(self.master, b"\x1b[1;1R")
+
+    def close(self):
+        # Release terminal output before waiting; the TUI can otherwise block while restoring it.
+        os.close(self.master)
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+
+
+class LocalModel:
+    """Keep a synthetic turn active so real clients can resume it without OpenAI access."""
+    def __init__(self):
+        self.received = threading.Event()
+        self.release = threading.Event()
+        model = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                model.received.set()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(b'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_synthetic_test","status":"in_progress","output":[]}}\n\n')
+                self.wfile.flush()
+                model.release.wait(60)
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.release.set()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
 
 
 class Proxy:
@@ -169,6 +250,47 @@ class LiveCodexTests(unittest.TestCase):
         result = subprocess.run(["/bin/bash", str(REPO / "bin/argon-agent"), "codex", "live-test", "app-server", "daemon", "version"], env=self.env, cwd=self.home, capture_output=True, text=True, timeout=25)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(list(self.home.glob("argon-codex.*")))
+        self.assertFalse((self.codex_home / "auth.json").exists())
+
+    def test_real_terminals_resume_active_thread_without_configured_permission_overrides(self):
+        self.stop_daemon()
+        model = LocalModel()
+        self.addCleanup(model.close)
+        (self.codex_home / "config.toml").write_text('model="synthetic-test"\nmodel_provider="local_test"\n[model_providers.local_test]\nname="Local test"\nbase_url="http://127.0.0.1:' + str(model.server.server_port) + '/v1"\nwire_api="responses"\nrequires_openai_auth=false\nsupports_websockets=false\n')
+        result = self.command("app-server", "daemon", "start")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.socket = json.loads(result.stdout)["socketPath"]
+        first = Proxy(self.websocat, self.socket, self.env)
+        self.addCleanup(first.close)
+        observer = Proxy(self.websocat, self.socket, self.env)
+        self.addCleanup(observer.close)
+        first.initialize()
+        observer.initialize()
+        started = first.request("thread/start", {"cwd":str(self.home), "approvalPolicy":"on-request", "sandbox":"workspace-write", "ephemeral":False})
+        thread_id = started["thread"]["id"]
+        prompt = "Synthetic local launcher test."
+        turn = first.request("turn/start", {"threadId":thread_id, "input":[{"type":"text", "text":prompt}]})
+        self.assertTrue(model.received.wait(10), "the turn must use only the loopback fake model")
+        # Control: the real CLI must reproduce the error that the old fake missed.
+        rejected = Terminal([CODEX, "--remote", "unix://" + self.socket, "--no-alt-screen", "--yolo", "resume", thread_id], self.env, self.home)
+        self.addCleanup(rejected.close)
+        rejected.wait_for("Permission overrides are not supported when resuming a remote task.")
+        self.assertEqual(rejected.process.wait(timeout=5), 1)
+        script = 'set -euo pipefail\nsource "$1"\nARGON_COMMAND=("$2" --no-alt-screen "$5")\ncodex_remote_run "$2" "$3" resume "$4"\n'
+        terminals = []
+        for flag in ("--yolo", "--approve-for-me"):
+            terminal = Terminal(["/bin/bash", "-c", script, "argon-live-test", str(REPO / "lib/codex-remote.sh"), CODEX, self.socket, thread_id, flag], self.env, self.home)
+            self.addCleanup(terminal.close)
+            terminal.wait_for(prompt)
+            terminals.append(terminal)
+        for terminal in terminals:
+            self.assertIsNone(terminal.process.poll(), "both terminals must remain attached")
+        resumed = observer.request("thread/resume", {"threadId":thread_id})
+        self.assertEqual(resumed["thread"]["id"], thread_id)
+        self.assertEqual(resumed["thread"]["turns"][-1]["status"], "inProgress")
+        self.assertEqual(resumed["approvalPolicy"], "on-request")
+        self.assertEqual(resumed["sandbox"]["type"], "workspaceWrite")
+        observer.request("turn/interrupt", {"threadId":thread_id, "turnId":turn["turn"]["id"]})
         self.assertFalse((self.codex_home / "auth.json").exists())
 
 

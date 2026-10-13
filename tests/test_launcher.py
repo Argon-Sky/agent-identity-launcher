@@ -156,14 +156,39 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.events("rpc"), [])
 
     def test_remote_resume_and_config_arguments_survive_attach(self):
-        self.configure(remote=1, arguments=("--yolo",))
+        self.configure(remote=1, arguments=("--yolo", "--model", "test-model", "--no-alt-screen"))
         result = self.launch("resume", "thread-id", "prompt with spaces")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.events("attached")[0]["args"], ["--remote", "unix://" + self.env["FAKE_SOCKET"], "--yolo", "resume", "thread-id", "prompt with spaces"])
+        self.assertEqual(self.events("attached")[0]["args"], ["--remote", "unix://" + self.env["FAKE_SOCKET"], "--model", "test-model", "--no-alt-screen", "resume", "thread-id", "prompt with spaces"])
         methods = [event["method"] for event in self.events("rpc")]
         self.assertLess(methods.index("command/exec"), methods.index("remoteControl/enable"))
         enable = next(event for event in self.events("rpc") if event["method"] == "remoteControl/enable")
         self.assertEqual(enable["params"], {"ephemeral":True})
+
+    def test_remote_resume_keeps_saved_permissions_and_explicit_caller_arguments(self):
+        flags = (("--yolo",), ("--dangerously-bypass-approvals-and-sandbox",), ("--approve-for-me",), ("--ask-for-approval", "never"), ("-a", "never"), ("--ask-for-approval=never",), ("-anever",), ("--sandbox", "workspace-write"), ("-s", "workspace-write"), ("--sandbox=workspace-write",), ("-sworkspace-write",))
+        for configured in flags:
+            with self.subTest(configured=configured):
+                self.log.unlink(missing_ok=True)
+                self.configure(remote=1, arguments=configured)
+                result = self.launch("--model", "override-model", "resume", "thread-id", "--sandbox", "read-only")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.events("attached")[0]["args"][2:], ["--model", "override-model", "resume", "thread-id", "--sandbox", "read-only"])
+
+    def test_remote_new_threads_keep_configured_permissions(self):
+        self.configure(remote=1, arguments=("--yolo", "--model", "resume"))
+        for arguments in (("new prompt",), ("--", "resume")):
+            with self.subTest(arguments=arguments):
+                self.log.unlink(missing_ok=True)
+                result = self.launch(*arguments)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.events("attached")[0]["args"][2:], ["--yolo", "--model", "resume", *arguments])
+
+    def test_remote_resume_in_config_omits_permissions_and_preserves_option_values(self):
+        self.configure(remote=1, arguments=("--yolo", "-c", "--yolo", "resume", "--last"))
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.events("attached")[0]["args"][2:], ["-c", "--yolo", "resume", "--last"])
 
     def test_remote_uses_separate_home_and_leaves_personal_state_untouched(self):
         personal = self.home / ".codex"
