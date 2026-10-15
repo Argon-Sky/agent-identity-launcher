@@ -56,6 +56,13 @@ codex_remote_run() {
     (( has_cwd )) || args+=(--cd "$PWD")
     args+=("${ARGON_COMMAND[@]:1}")
   fi
+  # Optional sidebar observer attaches only the terminal connection. The verified daemon, its identity, and ChatGPT's remote connection stay unchanged. Setup owns this descriptor.
+  local integration="$CODEX_HOME/herdr-codexbar.json" sidebar
+  if [[ ${HERDR_ENV:-} == 1 && -n ${HERDR_SOCKET_PATH:-} && -n ${HERDR_PANE_ID:-} && -f $integration ]]; then
+    sidebar=$(jq -er '.command | select(type == "string" and startswith("/") and (contains("\n") | not))' "$integration") || die "invalid Codex sidebar integration; run herdr-codexbar setup in this Codex home"
+    [[ -x $sidebar ]] || die "Codex sidebar integration is unavailable; run herdr-codexbar setup in this Codex home"
+    exec "$sidebar" codex-remote "$socket" "${args[@]}" "$@"
+  fi
   exec "${args[@]}" "$@"
 }
 
