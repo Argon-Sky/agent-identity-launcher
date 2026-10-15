@@ -28,6 +28,7 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[1]
 CODEX = os.environ.get("ARGON_TEST_CODEX")
+CODEXBAR = os.environ.get("ARGON_TEST_CODEXBAR")
 
 
 class Terminal:
@@ -43,8 +44,8 @@ class Terminal:
             os.close(slave)
         self.output = b""
 
-    def wait_for(self, text):
-        deadline = time.monotonic() + 15
+    def wait_for(self, text, timeout=15):
+        deadline = time.monotonic() + timeout
         while text.encode() not in self.output:
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not select.select([self.master], [], [], remaining)[0]:
@@ -61,7 +62,10 @@ class Terminal:
 
     def close(self):
         # Release terminal output before waiting; the TUI can otherwise block while restoring it.
+        if self.master is None:
+            return
         os.close(self.master)
+        self.master = None
         if self.process.poll() is None:
             self.process.terminate()
             try:
@@ -318,8 +322,16 @@ class LiveCodexTests(unittest.TestCase):
         new_terminal = Terminal(["/bin/bash", "-c", new_script, "argon-live-test", str(REPO / "lib/codex-remote.sh"), CODEX, self.socket, new_prompt], self.env, invoking)
         self.addCleanup(new_terminal.close)
         new_terminal.wait_for(new_prompt)
-        loaded = observer.request("thread/loaded/list", {})
-        new_threads = [identifier for identifier in loaded["data"] if identifier != thread_id]
+        deadline = time.monotonic() + 10
+        new_threads = []
+        while not new_threads and time.monotonic() < deadline:
+            loaded = observer.request("thread/loaded/list", {})
+            for identifier in loaded["data"]:
+                summary = observer.request("thread/read", {"threadId":identifier, "includeTurns":False})["thread"]
+                if identifier != thread_id and not summary.get("ephemeral") and summary.get("cwd") == str(invoking):
+                    new_threads.append(identifier)
+            if not new_threads:
+                time.sleep(0.05)
         self.assertEqual(len(new_threads), 1)
         created = observer.request("thread/read", {"threadId":new_threads[0], "includeTurns":True})
         self.assertEqual(created["thread"]["cwd"], str(invoking))
@@ -330,6 +342,150 @@ class LiveCodexTests(unittest.TestCase):
         self.assertEqual(resumed["approvalPolicy"], "on-request")
         self.assertEqual(resumed["sandbox"]["type"], "workspaceWrite")
         observer.request("turn/interrupt", {"threadId":thread_id, "turnId":turn["turn"]["id"]})
+        self.assertFalse((self.codex_home / "auth.json").exists())
+
+    @unittest.skipUnless(CODEXBAR, "set ARGON_TEST_CODEXBAR to test the optional terminal sidebar")
+    def test_sidebar_tracks_two_terminals_on_the_same_identity_verified_daemon(self):
+        self.assertTrue(Path(CODEXBAR).is_absolute())
+        self.stop_daemon()
+        model = LocalModel()
+        self.addCleanup(model.close)
+        (self.codex_home / "config.toml").write_text('model="synthetic-test"\nmodel_provider="local_test"\n[model_providers.local_test]\nname="Local test"\nbase_url="http://127.0.0.1:' + str(model.server.server_port) + '/v1"\nwire_api="responses"\nrequires_openai_auth=false\nsupports_websockets=false\n[projects.' + json.dumps(str(self.home)) + ']\ntrust_level="trusted"\n')
+        (self.codex_home / "herdr-codexbar.json").write_text(json.dumps({"command": CODEXBAR}))
+        state = self.home / "herdr.json"
+        herdr = self.home / "bin/herdr"
+        herdr.write_text('''#!/usr/bin/env python3
+import fcntl, json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_HERDR_STATE"], "a+") as f:
+    fcntl.flock(f, fcntl.LOCK_EX)
+    f.seek(0)
+    data = json.loads(f.read() or "{}")
+    pane = data.setdefault(args[2], {"pane_id": args[2], "agent": "codex", "tokens": {}})
+    if args[1] == "report-agent-session" and args[args.index("--source") + 1] == "herdr:codex":
+        pane["agent_session"] = {"kind": "id", "value": args[args.index("--agent-session-id") + 1]}
+    elif args[1] == "report-metadata":
+        for i, arg in enumerate(args):
+            if arg == "--token":
+                key, _, value = args[i + 1].partition("=")
+                pane["tokens"][key] = value
+            elif arg == "--clear-token":
+                pane["tokens"].pop(args[i + 1], None)
+    f.seek(0)
+    f.truncate()
+    json.dump(data, f)
+    print(json.dumps({"result": {"pane": pane}}))
+''')
+        herdr.chmod(0o755)
+        # The daemon deliberately retains a dead pane. Each terminal has its own current context.
+        self.env.update(HERDR_ENV="1", HERDR_PANE_ID="wOld:p1", HERDR_SOCKET_PATH=str(self.home / "herdr.sock"), HERDR_BIN_PATH=str(herdr), FAKE_HERDR_STATE=str(state), HERDR_CODEXBAR_STATE=str(self.home / "sidebar-state"))
+        result = self.command("app-server", "daemon", "start")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.socket = json.loads(result.stdout)["socketPath"]
+        observer = Proxy(self.websocat, self.socket, self.env)
+        self.addCleanup(observer.close)
+        observer.initialize()
+
+        def interrupt_threads():
+            for identifier in observer.request("thread/loaded/list", {})["data"]:
+                summary = observer.request("thread/read", {"threadId": identifier, "includeTurns": False})["thread"]
+                if not summary.get("path"):
+                    continue  # The identity probe also creates an ephemeral thread.
+                thread = observer.request("thread/read", {"threadId": identifier, "includeTurns": True})["thread"]
+                for turn in thread["turns"]:
+                    if turn["status"] == "inProgress":
+                        observer.request("turn/interrupt", {"threadId": identifier, "turnId": turn["id"]})
+
+        self.addCleanup(interrupt_threads)
+        script = 'set -euo pipefail\nsource "$1"\nARGON_COMMAND=("$2" --no-alt-screen --yolo)\ncodex_remote_run "$2" "$3" "$4"\n'
+        terminals = []
+        for pane in ("w1:p1", "w1:p2"):
+            model.received.clear()
+            prompt = "Synthetic sidebar test for " + pane
+            terminal = Terminal(["/bin/bash", "-c", script, "argon-live-test", str(REPO / "lib/codex-remote.sh"), CODEX, self.socket, prompt], dict(self.env, HERDR_PANE_ID=pane), self.home)
+            self.addCleanup(terminal.close)
+            terminal.wait_for(prompt, timeout=30)
+            self.assertTrue(model.received.wait(10), "wait for the synthetic turn to reach the local model")
+            terminals.append(terminal)
+
+        def sidebar_ready():
+            try:
+                # Read under the same lock as the fake Herdr writer.
+                with state.open() as f:
+                    fcntl.flock(f, fcntl.LOCK_SH)
+                    data = json.load(f)
+                if all(data.get(pane, {}).get("tokens", {}).get("hc_model") == "synthetic-test" for pane in ("w1:p1", "w1:p2")):
+                    return data
+            except (OSError, ValueError):
+                pass
+
+        deadline = time.monotonic() + 10
+        data = sidebar_ready()
+        while data is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+            data = sidebar_ready()
+        self.assertIsNotNone(data, "both terminal connections must publish their own model")
+        self.assertNotIn("wOld:p1", data)
+        threads = [data[pane]["agent_session"]["value"] for pane in ("w1:p1", "w1:p2")]
+        self.assertEqual(len(set(threads)), 2)
+        loaded = observer.request("thread/loaded/list", {})
+        self.assertTrue(set(threads).issubset(loaded["data"]))
+        for thread_id in threads:
+            read = observer.request("thread/read", {"threadId": thread_id, "includeTurns": True})
+            self.assertEqual(read["thread"]["cwd"], str(self.home))
+            # An independent client can attach to the terminal's exact thread on the same daemon.
+            resumed = observer.request("thread/resume", {"threadId": thread_id})
+            self.assertEqual(resumed["thread"]["id"], thread_id)
+            self.assertEqual(resumed["sandbox"]["type"], "dangerFullAccess")
+        resume_script = 'set -euo pipefail\nsource "$1"\nARGON_COMMAND=("$2" --no-alt-screen --yolo)\ncodex_remote_run "$2" "$3" resume "$4"\n'
+        resumed_terminal = Terminal(["/bin/bash", "-c", resume_script, "argon-live-test", str(REPO / "lib/codex-remote.sh"), CODEX, self.socket, threads[0]], dict(self.env, HERDR_PANE_ID="w1:p3"), self.home)
+        self.addCleanup(resumed_terminal.close)
+        resumed_terminal.wait_for("Synthetic sidebar test for w1:p1", timeout=30)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            data = sidebar_ready()
+            if data and data.get("w1:p3", {}).get("tokens", {}).get("hc_model") == "synthetic-test":
+                break
+            time.sleep(0.05)
+        self.assertEqual(data["w1:p3"]["agent_session"]["value"], threads[0])
+        self.assertEqual(data["w1:p3"]["tokens"]["hc_model"], "synthetic-test")
+        interrupt_threads()
+        # The startup picker and /resume open additional connections to the same endpoint.
+        picker_script = 'set -euo pipefail\nsource "$1"\nARGON_COMMAND=("$2" --no-alt-screen --yolo)\ncodex_remote_run "$2" "$3" resume\n'
+        picker = Terminal(["/bin/bash", "-c", picker_script, "argon-live-test", str(REPO / "lib/codex-remote.sh"), CODEX, self.socket], dict(self.env, HERDR_PANE_ID="w1:p4"), self.home)
+        self.addCleanup(picker.close)
+        picker.wait_for("Synthetic sidebar test for", timeout=20)
+        os.write(picker.master, b"\r")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            data = sidebar_ready()
+            if data and data.get("w1:p4", {}).get("agent_session", {}).get("value") in threads:
+                break
+            time.sleep(0.05)
+        self.assertIn(data.get("w1:p4", {}).get("agent_session", {}).get("value"), threads)
+        resumed_terminal.output = b""
+        os.write(resumed_terminal.master, b"/resume")
+        resumed_terminal.wait_for("resume", timeout=10)
+        os.write(resumed_terminal.master, b"\r")
+        resumed_terminal.wait_for("Resume a previous session", timeout=20)
+        resumed_terminal.wait_for("Synthetic sidebar test for", timeout=20)
+        resumed_terminal.output = b""
+        os.write(resumed_terminal.master, b"w1:p2")
+        resumed_terminal.wait_for("w1:p2", timeout=10)
+        os.write(resumed_terminal.master, b"\r")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            data = sidebar_ready()
+            if data and data.get("w1:p3", {}).get("agent_session", {}).get("value") == threads[1]:
+                break
+            time.sleep(0.05)
+        self.assertEqual(data["w1:p3"]["agent_session"]["value"], threads[1])
+        self.assertEqual(self.verify_server(self.env).returncode, 0)
+        terminals[0].close()
+        loaded = observer.request("thread/loaded/list", {})
+        self.assertIn(threads[0], loaded["data"], "closing a terminal must leave the daemon's thread available")
+        self.assertIsNone(terminals[1].process.poll())
+        self.assertIsNone(resumed_terminal.process.poll())
         self.assertFalse((self.codex_home / "auth.json").exists())
 
 

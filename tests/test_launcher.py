@@ -179,6 +179,38 @@ class LauncherTests(unittest.TestCase):
         enable = next(event for event in self.events("rpc") if event["method"] == "remoteControl/enable")
         self.assertEqual(enable["params"], {"ephemeral":True})
 
+    def test_remote_sidebar_observes_the_verified_connection_without_changing_identity(self):
+        self.configure(remote=1, arguments=("--yolo", "--model", "test-model"))
+        directory = self.home / ".codex-argon/test"
+        directory.mkdir(parents=True)
+        sidebar = self.tools / "sidebar with spaces"
+        self.write_tool(sidebar.name, FAKE_CODEX)
+        (directory / "herdr-codexbar.json").write_text(json.dumps({"command": str(sidebar)}))
+        context = {"HERDR_ENV": "1", "HERDR_SOCKET_PATH": "/synthetic/herdr.sock", "HERDR_PANE_ID": "w1:p2"}
+        result = self.launch("resume", "thread-id", extra_env=context)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        attached = self.events("attached")[0]
+        self.assertEqual(attached["args"], ["codex-remote", self.env["FAKE_SOCKET"], str(self.tools / "codex"), "--remote", "unix://" + self.env["FAKE_SOCKET"], "--model", "test-model", "resume", "thread-id"])
+        self.assertEqual(attached["identity"]["GIT_AUTHOR_NAME"], "test-agent[bot]")
+        self.assertFalse(attached["tokens_present"])
+        methods = [event["method"] for event in self.events("rpc")]
+        self.assertLess(methods.index("command/exec"), methods.index("remoteControl/enable"))
+        self.log.unlink()
+        result = self.launch(extra_env={"HERDR_ENV": ""})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.events("attached")[0]["args"][:2], ["--remote", "unix://" + self.env["FAKE_SOCKET"]])
+
+    def test_remote_sidebar_rejects_invalid_or_missing_commands(self):
+        self.configure(remote=1)
+        directory = self.home / ".codex-argon/test"
+        directory.mkdir(parents=True)
+        for command in ("relative-command", "/missing/command", "/bad\ncommand"):
+            with self.subTest(command=command):
+                self.log.unlink(missing_ok=True)
+                (directory / "herdr-codexbar.json").write_text(json.dumps({"command": command}))
+                result = self.launch(extra_env={"HERDR_ENV": "1", "HERDR_SOCKET_PATH": "/synthetic/herdr.sock", "HERDR_PANE_ID": "w1:p2"})
+                self.assert_refused(result, "sidebar integration")
+
     def test_remote_resume_keeps_saved_permissions_and_explicit_caller_arguments(self):
         flags = (("--yolo",), ("--dangerously-bypass-approvals-and-sandbox",), ("--approve-for-me",), ("--ask-for-approval", "never"), ("-a", "never"), ("--ask-for-approval=never",), ("-anever",), ("--sandbox", "workspace-write"), ("-s", "workspace-write"), ("--sandbox=workspace-write",), ("-sworkspace-write",))
         for configured in flags:
