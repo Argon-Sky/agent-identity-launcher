@@ -106,13 +106,38 @@ codex_remote_manage() {
     login/*/*|logout/*/*|help/*/*|--help/*/*|-h/*/*|app-server/daemon/version|app-server/daemon/stop|app-server/daemon/disable-remote-control|remote-control/stop/*) ;;
     *) codex_remote_socket "$codex" 1 > /dev/null || exit 1 ;;
   esac
+  if [[ ${1:-}/${2:-}/${3:-} == app-server/daemon/stop ]]; then
+    local status=0
+    "$codex" "$@" || status=$?
+    codex_stop_updater
+    exit "$status"
+  fi
   exec "$codex" "$@"
+}
+
+# Codex's package updater outlives `daemon stop` and, on its next update, restarts the server with the environment
+# of the launch that first started it. Stop it with the server, so the next launch starts both with its own identity.
+# Only the process Codex recorded as this home's updater is stopped, and only while it still runs from this home.
+codex_stop_updater() {
+  local record="$CODEX_HOME/app-server-daemon/daemon-updater.pid" pid command waited=0
+  [[ -f $record ]] || return 0
+  pid=$(jq -er '.pid | select(type == "number" and . > 1)' "$record" 2>/dev/null) || return 0
+  command=$(ps -ww -o command= -p "$pid" 2>/dev/null) || return 0
+  [[ $command == "$CODEX_HOME/packages/app-server-daemon/releases/"*" app-server daemon pid-update-loop" ]] || return 0
+  kill "$pid" 2>/dev/null || return 0
+  # A stopped process can stay a zombie until its parent reaps it, so wait for its command line to go, not its PID.
+  while [[ $(ps -ww -o command= -p "$pid" 2>/dev/null) == "$command" ]]; do
+    (( waited < 50 )) || die "the Codex update loop (pid $pid) did not stop; stop it before launching again, or it will restart the server with its old environment"
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  echo "argon-agent: stopped the Codex update loop (pid $pid), so the next launch starts it with the current environment" >&2
 }
 
 # Reuse Codex's lifecycle lock and websocat's WebSocket-over-Unix transport. Never restart an existing server.
 # Check the server over the same connection used to enable remote access, before attaching the TUI.
 codex_remote_socket() (
-  local codex=$1 check_only=${2:-0} output=${3:-socket} lifecycle socket response expected actual probe deadline remaining line
+  local codex=$1 check_only=${2:-0} output=${3:-socket} lifecycle socket response expected actual probe deadline remaining line differences
   lifecycle=$("$codex" app-server daemon start) || die "could not start the Codex server"
   socket=$(jq -er '.socketPath | select(type == "string" and startswith("/") and (contains("\n") | not))' <<< "$lifecycle") ||
     die "Codex did not return an absolute server socket path"
@@ -169,8 +194,11 @@ codex_remote_socket() (
   # Codex hands commands the server's environment filtered by its shell_environment_policy, which can drop *TOKEN* variables.
   jq -en --argjson expected "$expected" --argjson actual "$actual" '($expected | del(.opToken)) != ($actual | del(.opToken)) or $expected.opToken == $actual.opToken' > /dev/null ||
     die "the bot Codex server's commands do not get the 1Password service account token this launch has: the server started before op.token or ARGON_OP_SESSION_TOKEN changed, or shell_environment_policy in $CODEX_HOME/config.toml drops it. Finish its active work, stop it yourself with 'argon-agent codex $AGENT app-server daemon stop', then launch again. No server was stopped or remote access enabled by this launch"
-  jq -en --argjson expected "$expected" --argjson actual "$actual" '$expected == $actual and $actual.noTokens' > /dev/null ||
-    die "the bot Codex server has a different GitHub identity or credential environment. Finish its active work, stop it yourself with 'argon-agent codex $AGENT app-server daemon stop', then launch again. No server was stopped or remote access enabled by this launch"
+  # Names only, never values: the differing variables say whether the identity, the launcher path or a token changed.
+  differences=$(jq -rn --argjson expected "$expected" --argjson actual "$actual" '[(($expected.identity + $actual.identity) | keys[] | select($expected.identity[.] != $actual.identity[.])), (if $expected.gh != $actual.gh then "gh on PATH" else empty end), (if $actual.noTokens then empty else "GH_TOKEN or GITHUB_TOKEN set" end)] | join(", ")') ||
+    die "could not compare the Codex server identity"
+  [[ -z $differences ]] ||
+    die "the bot Codex server has a different GitHub identity or credential environment (differs: $differences). Finish its active work, stop it yourself with 'argon-agent codex $AGENT app-server daemon stop', then launch again. No server was stopped or remote access enabled by this launch"
 
   if [[ $check_only == 0 ]]; then
     codex_rpc 3 remoteControl/enable '{"ephemeral":true}'
