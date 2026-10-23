@@ -335,6 +335,35 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(self.events("rpc"), [])
                 self.assertEqual(self.events("attached")[0]["args"], list(arguments))
 
+    def start_updater(self, command):
+        # cat blocks on stdin; exec -a sets the whole argv, so ps shows exactly the given command line.
+        process = subprocess.Popen([BASH, "-c", 'exec -a "$1" /bin/cat', "updater", command], stdin=subprocess.PIPE)
+        self.addCleanup(lambda: (process.kill(), process.wait()))
+        record = self.home / ".codex-argon/test/app-server-daemon/daemon-updater.pid"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"pid":process.pid, "processStartTime":"synthetic"}))
+        time.sleep(0.2)
+        return process
+
+    def test_daemon_stop_also_stops_the_update_loop_that_would_restart_a_stale_server(self):
+        self.configure(remote=1)
+        loop = self.start_updater(str(self.home / ".codex-argon/test/packages/app-server-daemon/releases/0.1.0/bin/codex") + " app-server daemon pid-update-loop")
+        result = self.launch("app-server", "daemon", "stop", operation="codex", scenario="wrong_identity")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.events("attached")[0]["args"], ["app-server", "daemon", "stop"])
+        self.assertIsNotNone(loop.poll(), "the update loop must not survive daemon stop")
+        self.assertIn("stopped the Codex update loop", result.stderr)
+
+    def test_daemon_stop_leaves_processes_that_are_not_this_homes_update_loop(self):
+        self.configure(remote=1)
+        for command in ("/elsewhere/packages/app-server-daemon/releases/0.1.0/bin/codex app-server daemon pid-update-loop", str(self.home / ".codex-argon/test/packages/app-server-daemon/releases/0.1.0/bin/codex") + " app-server"):
+            with self.subTest(command=command):
+                process = self.start_updater(command)
+                result = self.launch("app-server", "daemon", "stop", operation="codex")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIsNone(process.poll())
+                self.assertNotIn("update loop", result.stderr)
+
     def test_remote_refuses_unsafe_home_overrides(self):
         self.configure(remote=1)
         personal = self.home / ".codex"
@@ -362,7 +391,9 @@ class LauncherTests(unittest.TestCase):
         for scenario in ("wrong_identity", "stale_token", "stale_github_token", "wrong_gh"):
             with self.subTest(scenario=scenario):
                 self.log.unlink(missing_ok=True)
-                self.assert_refused(self.launch(scenario=scenario), "different GitHub identity or credential environment")
+                result = self.launch(scenario=scenario)
+                self.assert_refused(result, "different GitHub identity or credential environment")
+                self.assertIn({"wrong_identity":"differs: GIT_AUTHOR_EMAIL)", "stale_token":"differs: GH_TOKEN or GITHUB_TOKEN set)", "stale_github_token":"differs: GH_TOKEN or GITHUB_TOKEN set)", "wrong_gh":"differs: gh on PATH)"}[scenario], result.stderr)
                 self.assertNotIn("remoteControl/enable", [event["method"] for event in self.events("rpc")])
                 self.assertFalse(any("stop" in event.get("args", []) for event in self.events("call")))
 
